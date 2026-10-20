@@ -143,7 +143,10 @@ def run_acme(domains, dns_arg, env, renew):
     if renew:
         cmd = base + ["--renew", "--no-cron", "-d", main]
     else:
-        # 默认用 Let's Encrypt 作为 CA（无需注册邮箱/EAB，最适合脚本化）；
+        # 固化默认 CA 为 Let's Encrypt（幂等），避免环境默认 CA 被改回 ZeroSSL 导致签发异常
+        subprocess.run([acme, "--home", LE_DIR, "--set-default-ca", "--server", "letsencrypt"],
+                       env=dict(os.environ, LE_WORKING_DIR=LE_DIR), capture_output=True, text=True)
+        # 签发时显式指定 Let's Encrypt（无需注册邮箱/EAB，最适合脚本化）；
         # 若想改用 ZeroSSL，去掉下面 --server 参数，并先执行一次 `acme.sh --register-account -m 你的邮箱`
         cmd = base + ["--issue", "--server", "letsencrypt", "--dns", dns_arg, "--no-cron", "-d", main]
         for d in domains[1:]:
