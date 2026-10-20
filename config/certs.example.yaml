@@ -50,7 +50,7 @@ certificates:
     domains:
       - "example.com"
       - "*.example.com"
-      - "app.example.com"
+      - "xxx.example.com"
 
   # 例2：Cloudflare 验证、签一张泛域名证书（部署到国际站）
   - name: "example.org"
