@@ -26,7 +26,6 @@ import time
 import subprocess
 import argparse
 import yaml
-import hashlib
 import shutil
 
 from aliyunsdkcore.client import AcsClient
@@ -39,9 +38,12 @@ try:
     from aliyunsdkdcdn.request.v20180115.SetDcdnDomainSSLCertificateRequest import SetDcdnDomainSSLCertificateRequest
 except ImportError:
     from aliyunsdkdcdn.request.v20180510.SetDcdnDomainSSLCertificateRequest import SetDcdnDomainSSLCertificateRequest
+try:
+    from aliyunsdkdcdn.request.v20180115.DescribeDcdnDomainCertificateInfoRequest import DescribeDcdnDomainCertificateInfoRequest
+except ImportError:
+    DescribeDcdnDomainCertificateInfoRequest = None
 
 LE_DIR = os.environ.get("LE_WORKING_DIR", os.path.join(os.path.expanduser("~"), ".acme.sh"))
-STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state")
 
 
 def acme_bin():
@@ -105,33 +107,6 @@ def cert_paths(domain):
     return os.path.join(base, "fullchain.cer"), os.path.join(base, domain + ".key")
 
 
-# ----------------------------- 部署状态（指纹跳过） -----------------------------
-def _safe_key(k):
-    return re.sub(r"[^A-Za-z0-9._-]", "_", k)
-
-
-def cert_fingerprint(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def load_deploy_state(key):
-    p = os.path.join(STATE_DIR, f"{_safe_key(key)}.state")
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
-
-
-def save_deploy_state(key, val):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(os.path.join(STATE_DIR, f"{_safe_key(key)}.state"), "w", encoding="utf-8") as f:
-        f.write(val)
-
-
 # ----------------------------- 证书域名解析 -----------------------------
 def cert_domains(cert):
     """该证书真正要签发的域名列表；不写 domains 时退化为 [name]（向后兼容）。"""
@@ -175,8 +150,8 @@ def make_client(account):
 
 
 # ----------------------------- 删除旧证书 -----------------------------
-def delete_old_certs(client, cert_name, keep):
-    """删除该证书名前缀的旧版本（auto-<cert_name>-*），保留 keep 那一份。"""
+def delete_old_certs(client, prefix, keep):
+    """删除指定名称前缀的旧证书（仅本脚本 acme_ 前缀管理的），保留 keep 那一份。"""
     req = DescribeUserCertificateListRequest()
     req.set_accept_format("json")
     req.set_CurrentPage(1)
@@ -188,7 +163,6 @@ def delete_old_certs(client, cert_name, keep):
         return
     raw = resp.get("CertificateList", {})
     certs = raw.get("Certificate", []) if isinstance(raw, dict) else (raw or [])
-    prefix = f"auto-{cert_name}"
     for c in certs:
         name = c.get("Name", "")
         cid = c.get("CertId")
@@ -277,29 +251,63 @@ def issue_certificate(cert, accounts, cf, force):
 
 
 # ----------------------------- 部署一组（证书 + 账号） -----------------------------
+def get_dcdn_cert(client, domain):
+    """查询 DCDN 域名当前绑定的证书信息；接口缺失或查询失败时返回 None。"""
+    if DescribeDcdnDomainCertificateInfoRequest is None:
+        return None
+    req = DescribeDcdnDomainCertificateInfoRequest()
+    req.set_accept_format("json")
+    req.set_DomainName(domain)
+    try:
+        resp = json.loads(client.do_action_with_exception(req))
+    except Exception as e:
+        log(f"[WARN] 查询 {domain} 当前绑定证书失败: {e}")
+        return None
+    infos = resp.get("CertInfos") or {}
+    items = infos.get("CertInfo", []) if isinstance(infos, dict) else (infos or [])
+    return items[0] if isinstance(items, list) and items else None
+
+
+def _leaf_pem(pem_text):
+    """取 PEM 文本里第一段证书（叶子），统一换行便于比较。"""
+    m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem_text or "", re.S)
+    return m.group(0).replace("\r\n", "\n").strip() if m else ""
+
+
 def deploy_cert_group(cert, account, acc_name, domains, force):
+    """以 DCDN 云端实际绑定状态为准做幂等：逐域名查当前绑定证书，与本地上传的
+    证书内容一致即跳过；否则上传（acme_ 前缀命名）并绑定，最后清理同名前缀的旧证书
+    （只动 acme_ 前缀，不碰手动上传的其他证书）。"""
     cert_name = cert["name"]
     main = cert_domains(cert)[0]
     cert_file, key_file = cert_paths(main)
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
         return
-    state_key = f"{cert_name}|{acc_name}"
-    # 证书未变化且绑定域名列表未变则跳过，避免每天重复上传/绑定/删旧
-    if not force:
-        fp = cert_fingerprint(cert_file)
-        saved = load_deploy_state(state_key)
-        if saved and saved == f"{fp}|{','.join(sorted(domains))}":
-            log(f"[SKIP] 证书 {cert_name} 在账号 {acc_name} 未变化，跳过上传/绑定")
-            return
     cert_pem = open(cert_file, "r", encoding="utf-8").read()
     key_pem = open(key_file, "r", encoding="utf-8").read()
     client = make_client(account)
-    ts = int(time.time())
-    # 1) 上传到阿里云 SSL 证书服务（该账号下只传一次）
+    # acme_ 前缀 = 本脚本管理的标识；* 等字符替换掉以保证证书名合法
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", cert_name)
+    cert_label = f"acme_{safe}_{time.strftime('%Y-%m-%d')}"
+    local_pem = _leaf_pem(cert_pem)
+    # 0) 逐域名检查云端已绑定的证书是否就是这份（acme_ 前缀 + 内容一致 + HTTPS 已开）
+    to_bind = []
+    for domain in domains:
+        bound = get_dcdn_cert(client, domain)
+        if (not force and bound
+                and bound.get("CertName", "").startswith(f"acme_{safe}_")
+                and str(bound.get("SSLProtocol")) == "on"
+                and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
+            log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
+            continue
+        to_bind.append(domain)
+    if not to_bind:
+        return
+    # 1) 上传到阿里云 SSL 证书服务
     req = CreateUserCertificateRequest()
     req.set_accept_format("json")
-    req.set_Name(f"auto-{cert_name}-{ts}")
+    req.set_Name(cert_label)
     req.set_Cert(cert_pem)
     req.set_Key(key_pem)
     try:
@@ -311,13 +319,13 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     if not cert_id:
         log(f"[ERROR] 上传证书未返回 CertId: {resp}")
         return
-    log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}）")
-    # 2) 绑定到该组所有 DCDN 加速域名
-    for domain in domains:
+    log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
+    # 2) 绑定到需要更新的 DCDN 加速域名
+    for domain in to_bind:
         req2 = SetDcdnDomainSSLCertificateRequest()
         req2.set_accept_format("json")
         req2.set_DomainName(domain)
-        req2.set_CertName(f"auto-{cert_name}-{ts}")
+        req2.set_CertName(cert_label)
         req2.set_SSLProtocol("on")
         # 优先用 CAS 证书 ID 引用（接口参数为 CertIdentifier，最规范、无需再传私钥）；
         # 个别 SDK 版本只有 set_CertId，则退而直接传证书内容（Cert + SSLPri）兜底
@@ -334,9 +342,8 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
             log(f"已绑定 DCDN {domain} -> cert_id={cert_id}")
         except Exception as e:
             log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
-    # 3) 清理该证书在账号下的旧版本
-    delete_old_certs(client, cert_name, keep=cert_id)
-    save_deploy_state(state_key, f"{cert_fingerprint(cert_file)}|{','.join(sorted(domains))}")
+    # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
+    delete_old_certs(client, f"acme_{safe}_", keep=cert_id)
 
 
 # ----------------------------- 主流程 -----------------------------
@@ -387,7 +394,7 @@ def process(cfg, force=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/certs.yaml")
-    ap.add_argument("--force", action="store_true", help="强制重新签发并部署（跳过 acme.sh 续期判断与指纹跳过）")
+    ap.add_argument("--force", action="store_true", help="强制重新签发并重新上传/绑定部署")
     args = ap.parse_args()
     if not os.path.exists(args.config):
         log(f"[ERROR] 配置文件不存在: {args.config}")
