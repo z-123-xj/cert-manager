@@ -37,9 +37,9 @@ from aliyunsdkcas.request.v20180713 import (
 )
 # DCDN SDK 的 API 版本目录随包版本变化（实测 2.2.19 为 v20180115），做兼容兜底
 try:
-    from aliyunsdkdcdn.request.v20180115 import SetDcdnDomainSSLCertificateRequest
+    from aliyunsdkdcdn.request.v20180115.SetDcdnDomainSSLCertificateRequest import SetDcdnDomainSSLCertificateRequest
 except ImportError:
-    from aliyunsdkdcdn.request.v20180510 import SetDcdnDomainSSLCertificateRequest
+    from aliyunsdkdcdn.request.v20180510.SetDcdnDomainSSLCertificateRequest import SetDcdnDomainSSLCertificateRequest
 
 LE_DIR = os.environ.get("LE_WORKING_DIR", os.path.join(os.path.expanduser("~"), ".acme.sh"))
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state")
