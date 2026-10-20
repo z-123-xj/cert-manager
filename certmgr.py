@@ -95,6 +95,13 @@ def load_config(path):
 
 # ----------------------------- 证书路径 -----------------------------
 def cert_paths(domain):
+    """返回 (fullchain.cer, <domain>.key)。acme.sh 用 ECC 时目录名为 <domain>_ecc，
+    RSA 时为 <domain>；优先检测已存在的目录，都不存在时回退到 <domain>（供首次签发前判断）。"""
+    for d in (domain + "_ecc", domain):
+        base = os.path.join(LE_DIR, d)
+        cert_file = os.path.join(base, "fullchain.cer")
+        if os.path.exists(cert_file):
+            return cert_file, os.path.join(base, domain + ".key")
     base = os.path.join(LE_DIR, domain)
     return os.path.join(base, "fullchain.cer"), os.path.join(base, domain + ".key")
 
