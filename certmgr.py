@@ -274,6 +274,19 @@ def _leaf_pem(pem_text):
     return m.group(0).replace("\r\n", "\n").strip() if m else ""
 
 
+def cert_not_after_date(cert_pem):
+    """取证书到期日 YYYY-MM-DD 用作 acme_ 后缀标签；解析失败回退当天。"""
+    try:
+        from cryptography import x509
+        c = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+        exp = getattr(c, "not_valid_after_utc", None)
+        if exp is None:
+            exp = c.not_valid_after
+        return exp.strftime("%Y-%m-%d")
+    except Exception:
+        return time.strftime("%Y-%m-%d")
+
+
 def deploy_cert_group(cert, account, acc_name, domains, force):
     """以 DCDN 云端实际绑定状态为准做幂等：逐域名查当前绑定证书，与本地上传的
     证书内容一致即跳过；否则上传（acme_ 前缀命名）并绑定，最后清理同名前缀的旧证书
@@ -289,7 +302,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     client = make_client(account)
     # acme_ 前缀 = 本脚本管理的标识；* 等字符替换掉以保证证书名合法
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", cert_name)
-    cert_label = f"acme_{safe}_{time.strftime('%Y-%m-%d')}"
+    cert_label = f"acme_{safe}_{cert_not_after_date(cert_pem)}"
     local_pem = _leaf_pem(cert_pem)
     # 0) 逐域名检查云端已绑定的证书是否就是这份（acme_ 前缀 + 内容一致 + HTTPS 已开）
     to_bind = []
