@@ -236,7 +236,8 @@ def issue_certificate(cert, accounts, cf, force):
         if not acc:
             log(f"[ERROR] 证书 {name} dns=aliyun 但 DNS 账号 {acc_name} 不存在，跳过")
             return
-        acme_env = {"ALI_KEY": acc["access_key"], "ALI_SECRET": acc["access_secret"]}
+        # acme.sh 的 dns_ali 插件读取的是 ALI_Key / ALI_Secret（注意大小写），不是 ALI_KEY
+        acme_env = {"ALI_Key": acc["access_key"], "ALI_Secret": acc["access_secret"]}
         dns_arg = "dns_ali"
     elif dns == "cloudflare":
         # cloudflare 支持多账号（命名子字典）；也兼容旧的「单账号直接写在 cloudflare 下」写法
