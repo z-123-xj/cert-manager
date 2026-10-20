@@ -8,8 +8,9 @@
   3. 清理该证书在阿里云上的旧版本（保留刚上传的）
 
 配置分两部分：
-  - certificates:   要签发的证书（可泛域名 *.example.com；extra_domains 可把裸域等并入同一张证书）
-  - dcdn_domains:   具体的 DCDN 加速域名，自动匹配上面「能覆盖它的证书」
+  - certificates:   要签发的证书。name 为标识（acme 目录名 / CAS 前缀 / dcdn 的 cert 引用）；
+                    domains 列出真正要签发的域名（裸域 / 泛域 / 子域），全部签进同一张证书（SAN）。
+  - dcdn_domains:   具体的 DCDN 加速域名，可显式用 cert 指定用哪张证书（不写则自动按后缀匹配）
 每个证书只签发一次，可被多个 DCDN 域名共用（按「证书 + 部署账号」分组，每组只上传一次）。
 
 支持国内站 / 国际站两套阿里云账号部署；DNS 验证可分别走阿里云 DNS 或 Cloudflare（按证书配置）。
@@ -94,23 +95,25 @@ def save_deploy_state(key, val):
         f.write(val)
 
 
+# ----------------------------- 证书域名解析 -----------------------------
+def cert_domains(cert):
+    """该证书真正要签发的域名列表；不写 domains 时退化为 [name]（向后兼容）。"""
+    return list(cert.get("domains") or [cert["name"]])
+
+
 # ----------------------------- acme.sh 签发 -----------------------------
-def run_acme(main_domain, extra_domains, dns_arg, env, renew):
-    """调用 acme.sh 签发 / 续期。
-    main_domain:   主域名（证书目录与匹配以此命名）
-    extra_domains: SAN 附加域名列表（如裸域，需与主域同验证方式）
-    dns_arg:       验证方式 dns_ali / dns_cf
-    env:           对应 DNS 提供方的凭证环境变量
-    """
+def run_acme(domains, dns_arg, env, renew):
+    """调用 acme.sh 签发 / 续期。domains[0] 作主域名，其余作 SAN，每个拆成 -d。"""
     env = dict(os.environ, **env)
+    main = domains[0]
     if renew:
-        cmd = ["acme.sh", "--renew", "--no-cron", "-d", main_domain]
+        cmd = ["acme.sh", "--renew", "--no-cron", "-d", main]
     else:
-        cmd = ["acme.sh", "--issue", "--dns", dns_arg, "--no-cron", "-d", main_domain]
-        for d in (extra_domains or []):
+        cmd = ["acme.sh", "--issue", "--dns", dns_arg, "--no-cron", "-d", main]
+        for d in domains[1:]:
             cmd += ["-d", d]
-    log(f"acme.sh {'renew' if renew else 'issue'} {main_domain}" +
-        (f" +SAN {extra_domains}" if extra_domains else ""))
+    log(f"acme.sh {'renew' if renew else 'issue'} {main}" +
+        (f" +SAN {domains[1:]}" if len(domains) > 1 else ""))
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     out = (r.stdout or "") + (r.stderr or "")
     log(out[-2000:])  # 只打印末尾，避免刷屏
@@ -157,9 +160,8 @@ def delete_old_certs(client, cert_name, keep):
 
 # ----------------------------- 证书覆盖匹配 -----------------------------
 def cert_covers(cert, domain):
-    """domain 是否被该证书覆盖（证书名或 extra_domains 之一）。"""
-    names = [cert["name"]] + list(cert.get("extra_domains", []) or [])
-    for n in names:
+    """domain 是否被该证书覆盖（domains 列表中的任一项）。"""
+    for n in cert_domains(cert):
         if n == domain:
             return True
         if n.startswith("*."):
@@ -177,9 +179,9 @@ def match_cert(domain, certs):
     for c in certs:
         if not cert_covers(c, domain):
             continue
-        if c["name"] == domain or domain in (c.get("extra_domains") or []):
+        if domain in cert_domains(c):
             exact = c
-        sufs = [n[2:] for n in ([c["name"]] + list(c.get("extra_domains", []) or [])) if n.startswith("*.")]
+        sufs = [n[2:] for n in cert_domains(c) if n.startswith("*.")]
         if sufs:
             suf = max(sufs)
             if len(suf) > best_len:
@@ -221,16 +223,18 @@ def issue_certificate(cert, accounts, cf, force):
     else:
         log(f"[ERROR] 证书 {name} 不支持的 dns={dns}，跳过")
         return
-    cert_file, _ = cert_paths(name)
+    domains = cert_domains(cert)
+    cert_file, _ = cert_paths(domains[0])
     exists = os.path.exists(cert_file)
     # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
-    run_acme(name, cert.get("extra_domains"), dns_arg, acme_env, renew=exists and not force)
+    run_acme(domains, dns_arg, acme_env, renew=exists and not force)
 
 
 # ----------------------------- 部署一组（证书 + 账号） -----------------------------
 def deploy_cert_group(cert, account, acc_name, domains, force):
     cert_name = cert["name"]
-    cert_file, key_file = cert_paths(cert_name)
+    main = cert_domains(cert)[0]
+    cert_file, key_file = cert_paths(main)
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
         return

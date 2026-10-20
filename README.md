@@ -53,7 +53,8 @@ cp config/certs.example.yaml config/certs.yaml
 
 配置分两部分（**证书与加速域名解耦**）：
 
-- **`certificates`**：要签发的证书（可泛域名 `*.example.com`；用 `extra_domains` 可把裸域等并入同一张证书）。
+- **`certificates`**：要签发的证书。`name` 是该证书的**标识**（也是 acme.sh 目录名、CAS 证书前缀、`dcdn_domains` 里 `cert` 引用的名字），不一定要进证书；
+  `domains` 是**真正要签发的完整域名列表**（裸域 / 泛域 / 子域），每个都会作为 `-d` 拆开、签进同一张证书（SAN）。不写 `domains` 时退化为只签 `name` 本身。
   每个证书有两条独立配置：
   - `dns`（验证方）：`aliyun` 用 `accounts` 里对应 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下某个命名子账号的 API Token；
   - `dns_account`：验证用的账号（`aliyun` → `accounts` 的 key；`cloudflare` → `cloudflare` 的命名子账号）。

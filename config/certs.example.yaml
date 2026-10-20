@@ -4,8 +4,9 @@
 # 账号命名约定：阿里云按「站点+序号」cn1/intl1/cn2/intl2...；Cloudflare 按 cloudflare1/cloudflare2...
 #
 # 配置分两部分：
-#   certificates:   要签发的证书（可泛域名 *.example.com；extra_domains 可把裸域等并入同一张证书）
-#   dcdn_domains:   具体的 DCDN 加速域名，可显式用 cert 指定用哪张证书（不写则自动按后缀匹配）
+#   certificates:   要签发的证书。name 是标识（acme 目录名 / CAS 证书前缀 / dcdn 里 cert 引用名）；
+#                   真正要签的域名都写在 domains 里（裸域 / 泛域 / 子域），每个拆成 -d 签进同一张证书（SAN）。
+#   dcdn_domains:   具体的 DCDN 加速域名，可用 cert 显式指定证书（不写则自动按后缀匹配）
 
 accounts:
   # 阿里云账号：既可用于「DNS 验证」（dns=aliyun），也可用于「部署」（上传证书+绑定 DCDN）
@@ -39,22 +40,25 @@ cloudflare:
     account_id: "${CF_ACCOUNT_ID_2}"
 
 # 要签发的证书（每个只签发一次，可被多个 DCDN 域名共用）
-# 证书「主名 name」既作为引用标识，也作为 acme.sh 本地目录名。
-# 同时覆盖裸域+泛域的常见写法（二选一）：
-#   写法 A（推荐，主题即泛域）：name: "*.example.com" + extra_domains: ["example.com"]
-#   写法 B（主题即裸域）：      name: "example.com"  + extra_domains: ["*.example.com"]
+# name 是标识（不一定要进证书）；真正要签的域名都显式写在 domains 列表里。
 certificates:
-  # 例1：国内站签一张证书，同时覆盖裸域 example.com 与泛域 *.example.com（写法 A）
-  - name: "*.example.com"
+  # 例1：国内站一张证书，覆盖裸域 example.com + 泛域 *.example.com + 三级子域 app.example.com
+  #      （三个域名都列在 domains 里，acme.sh 一次签成同一张 SAN 证书）
+  - name: "example.com"
     dns: aliyun
     dns_account: cn1
-    extra_domains:
+    domains:
       - "example.com"
+      - "*.example.com"
+      - "app.example.com"
 
   # 例2：Cloudflare 验证、签一张泛域名证书（部署到国际站）
-  - name: "*.example.org"
+  - name: "example.org"
     dns: cloudflare
     dns_account: cloudflare1
+    domains:
+      - "*.example.org"
+      - "example.org"
 
 # 具体的 DCDN 加速域名
 #   deploy_account：证书上传并绑定到哪个阿里云账号
@@ -64,13 +68,16 @@ certificates:
 dcdn_domains:
   - domain: "www.example.com"
     deploy_account: cn1
-    cert: "*.example.com"          # 显式指定证书（也可用写法 B 的 name: "example.com"）
+    cert: "example.com"
   - domain: "api.example.com"
     deploy_account: cn1
-    cert: "*.example.com"
-  - domain: "example.com"          # 裸域，由例1 证书的 extra_domains 覆盖
+    cert: "example.com"
+  - domain: "app.example.com"
     deploy_account: cn1
-    cert: "*.example.com"
-  - domain: "www.example.org"      # 匹配 *.example.org（DNS 在 CF，部署在国际站）
+    cert: "example.com"
+  - domain: "example.com"
+    deploy_account: cn1
+    cert: "example.com"
+  - domain: "www.example.org"
     deploy_account: intl1
-    cert: "*.example.org"
+    cert: "example.org"
