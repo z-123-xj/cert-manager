@@ -30,11 +30,10 @@ import hashlib
 import shutil
 
 from aliyunsdkcore.client import AcsClient
-from aliyunsdkcas.request.v20180713 import (
-    CreateUserCertificateRequest,
-    DeleteUserCertificateRequest,
-    DescribeUserCertificateListRequest,
-)
+# CAS SDK 与 DCDN 类似：包命名空间里 X 是模块，需从具体模块文件导入类
+from aliyunsdkcas.request.v20180713.CreateUserCertificateRequest import CreateUserCertificateRequest
+from aliyunsdkcas.request.v20180713.DeleteUserCertificateRequest import DeleteUserCertificateRequest
+from aliyunsdkcas.request.v20180713.DescribeUserCertificateListRequest import DescribeUserCertificateListRequest
 # DCDN SDK 的 API 版本目录随包版本变化（实测 2.2.19 为 v20180115），做兼容兜底
 try:
     from aliyunsdkdcdn.request.v20180115.SetDcdnDomainSSLCertificateRequest import SetDcdnDomainSSLCertificateRequest
@@ -298,7 +297,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     client = make_client(account)
     ts = int(time.time())
     # 1) 上传到阿里云 SSL 证书服务（该账号下只传一次）
-    req = CreateUserCertificateRequest.CreateUserCertificateRequest()
+    req = CreateUserCertificateRequest()
     req.set_accept_format("json")
     req.set_Name(f"auto-{cert_name}-{ts}")
     req.set_Cert(cert_pem)
@@ -319,7 +318,8 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         req2.set_accept_format("json")
         req2.set_DomainName(domain)
         req2.set_CertName(f"auto-{cert_name}-{ts}")
-        req2.set_CertId(str(cert_id))
+        req2.set_Cert(cert_pem)
+        req2.set_SSLPri(key_pem)
         req2.set_SSLProtocol("on")
         try:
             client.do_action_with_exception(req2)
