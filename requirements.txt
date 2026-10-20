@@ -1,0 +1,4 @@
+aliyun-python-sdk-core
+aliyun-python-sdk-cas
+aliyun-python-sdk-dcdn
+pyyaml
