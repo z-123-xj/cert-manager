@@ -179,7 +179,7 @@ def delete_old_certs(client, prefix, keep):
 
 def find_cert_id_by_name(client, name):
     """在 CAS 中按证书名称查找已存在的 CertId；找不到返回 None。
-    兼容不同返回结构与字段命名；未匹配时打印诊断摘要便于排查。"""
+    兼容不同返回结构与字段命名（含小写 name/id）；未匹配时打印诊断摘要。"""
     req = DescribeUserCertificateListRequest()
     req.set_accept_format("json")
     for setter, val in (("set_ShowSize", 500), ("set_PageSize", 500),
@@ -194,19 +194,16 @@ def find_cert_id_by_name(client, name):
     except Exception as e:
         log(f"[WARN] 查询证书列表失败: {e}")
         return None
-    # 兼容可能的返回结构容器
-    cl = (resp.get("CertificateList") or resp.get("CertificateListModel")
-          or resp.get("CertificateListResult") or {})
-    certs = cl.get("Certificate", []) if isinstance(cl, dict) else (cl or [])
-    if not certs and isinstance(resp.get("Certificate"), list):
-        certs = resp["Certificate"]
+    # CertificateList 可能是 list，也可能是 {Certificate:[...]}，兼容两者
+    cl = resp.get("CertificateList") or resp.get("CertificateListModel") or resp.get("Certificate") or []
+    certs = cl if isinstance(cl, list) else (cl.get("Certificate", []) if isinstance(cl, dict) else [])
     for c in certs:
-        cname = (c.get("Name") or c.get("certName") or c.get("CertName")
-                 or c.get("CommonName"))
+        cname = (c.get("name") or c.get("Name") or c.get("certName")
+                 or c.get("CertName") or c.get("CommonName"))
         if cname == name:
-            return c.get("CertId") or c.get("certId")
-    log(f"[DEBUG] 列表未匹配 name={name}；resp.keys={list(resp.keys())}；"
-        f"cl.type={type(cl).__name__}；样本={str(certs[:1])[:400]}")
+            return c.get("id") or c.get("CertId") or c.get("certId")
+    names = [c.get("name") or c.get("Name") or c.get("certName") for c in certs]
+    log(f"[DEBUG] 列表未匹配 name={name}；共 {len(certs)} 张；名称列表(前20)={names[:20]}")
     return None
 
 
