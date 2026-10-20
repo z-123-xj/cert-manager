@@ -27,6 +27,7 @@ import subprocess
 import argparse
 import yaml
 import hashlib
+import shutil
 
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcas.request.v20180713 import (
@@ -40,8 +41,34 @@ try:
 except ImportError:
     from aliyunsdkdcdn.request.v20180510 import SetDcdnDomainSSLCertificateRequest
 
-LE_DIR = os.environ.get("LE_WORKING_DIR", "/acme.sh")
+LE_DIR = os.environ.get("LE_WORKING_DIR", os.path.join(os.path.expanduser("~"), ".acme.sh"))
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state")
+
+
+def acme_bin():
+    """探测 acme.sh 可执行文件路径；支持 ACME_SH_BIN 环境变量或常见安装位置。"""
+    cands = []
+    if os.environ.get("ACME_SH_BIN"):
+        cands.append(os.environ["ACME_SH_BIN"])
+    which = shutil.which("acme.sh")
+    if which:
+        cands.append(which)
+    cands += [
+        os.path.join(os.path.expanduser("~"), ".acme.sh", "acme.sh"),
+        "/acme.sh/acme.sh",
+        "/root/.acme.sh/acme.sh",
+    ]
+    for c in cands:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return "acme.sh"  # 回退 PATH；若仍缺失 subprocess 会给出清晰报错
+
+
+def check_acme():
+    if acme_bin() == "acme.sh" and not shutil.which("acme.sh"):
+        log("[ERROR] 找不到 acme.sh。请先安装：curl https://get.acme.sh | sh")
+        log("        （若装在非标准路径，设置环境变量 ACME_SH_BIN=/path/to/acme.sh）")
+        sys.exit(1)
 
 
 def log(msg):
@@ -108,12 +135,15 @@ def cert_domains(cert):
 # ----------------------------- acme.sh 签发 -----------------------------
 def run_acme(domains, dns_arg, env, renew):
     """调用 acme.sh 签发 / 续期。domains[0] 作主域名，其余作 SAN，每个拆成 -d。"""
-    env = dict(os.environ, **env)
+    acme = acme_bin()
+    # 让 acme.sh 把证书存到 LE_DIR（与 cert_paths 读取位置一致）
+    env = dict(os.environ, LE_WORKING_DIR=LE_DIR, **env)
     main = domains[0]
+    base = [acme, "--home", LE_DIR]
     if renew:
-        cmd = ["acme.sh", "--renew", "--no-cron", "-d", main]
+        cmd = base + ["--renew", "--no-cron", "-d", main]
     else:
-        cmd = ["acme.sh", "--issue", "--dns", dns_arg, "--no-cron", "-d", main]
+        cmd = base + ["--issue", "--dns", dns_arg, "--no-cron", "-d", main]
         for d in domains[1:]:
             cmd += ["-d", d]
     log(f"acme.sh {'renew' if renew else 'issue'} {main}" +
@@ -342,6 +372,7 @@ def main():
         log(f"[ERROR] 配置文件不存在: {args.config}")
         sys.exit(1)
     cfg = load_config(args.config)
+    check_acme()
     process(cfg, force=args.force)
 
 
