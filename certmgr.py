@@ -178,19 +178,35 @@ def delete_old_certs(client, prefix, keep):
 
 
 def find_cert_id_by_name(client, name):
-    """在 CAS 中按证书名称查找已存在的 CertId；找不到返回 None。"""
+    """在 CAS 中按证书名称查找已存在的 CertId；找不到返回 None。
+    兼容不同返回结构与字段命名；未匹配时打印诊断摘要便于排查。"""
     req = DescribeUserCertificateListRequest()
     req.set_accept_format("json")
+    for setter, val in (("set_ShowSize", 500), ("set_PageSize", 500),
+                        ("set_CurrentPage", 1), ("set_PageNo", 1)):
+        if hasattr(req, setter):
+            try:
+                getattr(req, setter)(val)
+            except Exception:
+                pass
     try:
         resp = json.loads(client.do_action_with_exception(req))
     except Exception as e:
         log(f"[WARN] 查询证书列表失败: {e}")
         return None
-    raw = resp.get("CertificateList", {})
-    certs = raw.get("Certificate", []) if isinstance(raw, dict) else (raw or [])
+    # 兼容可能的返回结构容器
+    cl = (resp.get("CertificateList") or resp.get("CertificateListModel")
+          or resp.get("CertificateListResult") or {})
+    certs = cl.get("Certificate", []) if isinstance(cl, dict) else (cl or [])
+    if not certs and isinstance(resp.get("Certificate"), list):
+        certs = resp["Certificate"]
     for c in certs:
-        if c.get("Name") == name:
-            return c.get("CertId")
+        cname = (c.get("Name") or c.get("certName") or c.get("CertName")
+                 or c.get("CommonName"))
+        if cname == name:
+            return c.get("CertId") or c.get("certId")
+    log(f"[DEBUG] 列表未匹配 name={name}；resp.keys={list(resp.keys())}；"
+        f"cl.type={type(cl).__name__}；样本={str(certs[:1])[:400]}")
     return None
 
 
@@ -334,11 +350,9 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         to_bind.append(domain)
     if not to_bind:
         return
-    # 1) 上传到阿里云 SSL 证书服务（同名证书先查重复用，避免 NameRepeat 重复创建）
+    # 1) 上传到阿里云 SSL 证书服务（同名先查重，存在则复用，避免 NameRepeat 重复创建）
     cert_id = find_cert_id_by_name(client, cert_label)
-    if cert_id:
-        log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
-    else:
+    if not cert_id:
         req = CreateUserCertificateRequest()
         req.set_accept_format("json")
         req.set_Name(cert_label)
@@ -346,14 +360,18 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         req.set_Key(key_pem)
         try:
             resp = json.loads(client.do_action_with_exception(req))
+            cert_id = resp.get("CertId")
         except Exception as e:
-            log(f"[ERROR] 上传证书到阿里云失败: {e}")
-            return
-        cert_id = resp.get("CertId")
-        if not cert_id:
-            log(f"[ERROR] 上传证书未返回 CertId: {resp}")
-            return
-        log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
+            # 同名已存在（NameRepeat）时回退查重复用，避免重复创建
+            if "NameRepeat" in str(e):
+                cert_id = find_cert_id_by_name(client, cert_label)
+            if not cert_id:
+                log(f"[ERROR] 上传证书到阿里云失败: {e}")
+                return
+    if not cert_id:
+        log(f"[ERROR] 上传证书未返回 CertId")
+        return
+    log(f"已就绪证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
     # 2) 绑定到需要更新的 DCDN 加速域名
     for domain in to_bind:
         req2 = SetDcdnDomainSSLCertificateRequest()
