@@ -177,6 +177,23 @@ def delete_old_certs(client, prefix, keep):
                 log(f"[WARN] 删除旧证书 {cid} 失败: {e}")
 
 
+def find_cert_id_by_name(client, name):
+    """在 CAS 中按证书名称查找已存在的 CertId；找不到返回 None。"""
+    req = DescribeUserCertificateListRequest()
+    req.set_accept_format("json")
+    try:
+        resp = json.loads(client.do_action_with_exception(req))
+    except Exception as e:
+        log(f"[WARN] 查询证书列表失败: {e}")
+        return None
+    raw = resp.get("CertificateList", {})
+    certs = raw.get("Certificate", []) if isinstance(raw, dict) else (raw or [])
+    for c in certs:
+        if c.get("Name") == name:
+            return c.get("CertId")
+    return None
+
+
 # ----------------------------- 证书覆盖匹配 -----------------------------
 def cert_covers(cert, domain):
     """domain 是否被该证书覆盖（domains 列表中的任一项）。"""
@@ -317,22 +334,26 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         to_bind.append(domain)
     if not to_bind:
         return
-    # 1) 上传到阿里云 SSL 证书服务
-    req = CreateUserCertificateRequest()
-    req.set_accept_format("json")
-    req.set_Name(cert_label)
-    req.set_Cert(cert_pem)
-    req.set_Key(key_pem)
-    try:
-        resp = json.loads(client.do_action_with_exception(req))
-    except Exception as e:
-        log(f"[ERROR] 上传证书到阿里云失败: {e}")
-        return
-    cert_id = resp.get("CertId")
-    if not cert_id:
-        log(f"[ERROR] 上传证书未返回 CertId: {resp}")
-        return
-    log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
+    # 1) 上传到阿里云 SSL 证书服务（同名证书先查重复用，避免 NameRepeat 重复创建）
+    cert_id = find_cert_id_by_name(client, cert_label)
+    if cert_id:
+        log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
+    else:
+        req = CreateUserCertificateRequest()
+        req.set_accept_format("json")
+        req.set_Name(cert_label)
+        req.set_Cert(cert_pem)
+        req.set_Key(key_pem)
+        try:
+            resp = json.loads(client.do_action_with_exception(req))
+        except Exception as e:
+            log(f"[ERROR] 上传证书到阿里云失败: {e}")
+            return
+        cert_id = resp.get("CertId")
+        if not cert_id:
+            log(f"[ERROR] 上传证书未返回 CertId: {resp}")
+            return
+        log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
     # 2) 绑定到需要更新的 DCDN 加速域名
     for domain in to_bind:
         req2 = SetDcdnDomainSSLCertificateRequest()
