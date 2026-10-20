@@ -50,13 +50,20 @@ cp config/certs.example.yaml config/certs.yaml
 ```
 
 配置里可用 `${ENV_VAR}` 注入 AK（见下方运行步骤），也可直接写明文。
-每个域名有两条独立配置：
-- `dns`（验证方）：`aliyun` 用 `accounts` 里对应 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下某个命名账号的 API Token；
-- `deploy_account`（部署方）：证书上传并绑定到哪个阿里云账号（`accounts` 的 key）下的 DCDN。
-两者互不影响——DNS 在 Cloudflare、DCDN 在阿里云的域名同样支持。
+
+配置分两部分（**证书与加速域名解耦**）：
+
+- **`certificates`**：要签发的证书（可泛域名 `*.example.com`；用 `extra_domains` 可把裸域等并入同一张证书）。
+  每个证书有两条独立配置：
+  - `dns`（验证方）：`aliyun` 用 `accounts` 里对应 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下某个命名子账号的 API Token；
+  - `dns_account`：验证用的账号（`aliyun` → `accounts` 的 key；`cloudflare` → `cloudflare` 的命名子账号）。
+- **`dcdn_domains`**：具体的 DCDN 加速域名，程序**自动匹配「能覆盖它的证书」**（精确优先，否则最长泛域名后缀）。
+  每项用 `deploy_account` 指定证书上传并绑定到哪个阿里云账号（`accounts` 的 key）下的 DCDN。
+
+两者互不影响——DNS 在 Cloudflare、DCDN 在阿里云的域名同样支持。每个证书只签发一次，可被多个 DCDN 域名共用（按「证书 + 部署账号」分组，每组只上传一次）。
 
 **多账号**：阿里云可在 `accounts` 下加任意多个 key（如 `cn1` / `intl1` / `cn2` / `intl2`）；
-Cloudflare 在 `cloudflare` 下用命名子账号（如 `cloudflare1` / `cloudflare2`），域名用 `dns_account` 指定具体哪一个。
+Cloudflare 在 `cloudflare` 下用命名子账号（如 `cloudflare1` / `cloudflare2`），`dns_account` 指定具体哪一个。
 
 ## 运行（服务器原生，无 Docker）
 
@@ -69,10 +76,13 @@ pip install -r requirements.txt
 # 2) 准备配置
 cp config/certs.example.yaml config/certs.yaml   # 填域名与账号
 
-# 3) 注入 AK（写到 ~/.bashrc 或 cron 环境，确保 cron 能读到）
-export CN1_AK=xxx CN1_SK=xxx INTL1_AK=xxx INTL1_SK=xxx
-export CF_TOKEN_1=xxx CF_ACCOUNT_ID_1=xxx
-export LE_WORKING_DIR=$HOME/.acme.sh             # 指向 acme.sh 默认目录
+# 3) 配置 AK（二选一，推荐 A）
+#    A. 直接在 config/certs.yaml 写明文 access_key / secret_key（推荐：最简单，配合 .gitignore
+#       不提交该文件；cron 也能正常读到，无需任何环境变量）。选 A 则跳过下面的 export。
+#    B. 用环境变量注入：certs.yaml 里写 "${CN1_AK}" 这类引用，运行时需提供对应变量。
+#       ⚠️ 注意：~/.bashrc 里的 export 对 crontab 定时任务【无效】（cron 不加载 bashrc）！
+#       若选 B，请改用下方第 5 步 crontab 行内联变量的方式，不要依赖 bashrc。
+export LE_WORKING_DIR=$HOME/.acme.sh             # acme.sh 默认目录（本机需要，容器默认 /acme.sh）
 
 # 4) 立即执行一次
 python3 certmgr.py --config config/certs.yaml
@@ -82,7 +92,10 @@ python3 certmgr.py --config config/certs.yaml
 crontab -l | grep -v 'acme.sh --cron' | crontab -
 crontab -e
 # 加入（用 venv 里 python 绝对路径）：
+# 方式 A（certs.yaml 明文）：无需任何 AK 变量
 17 3 * * * cd /opt/cert-manager && /opt/cert-manager/venv/bin/python3 certmgr.py --config /opt/cert-manager/config/certs.yaml >> /opt/cert-manager/logs/certmgr.log 2>&1
+# 方式 B（certs.yaml 用 ${...} 引用）：变量需内联在 cron 行里（bashrc 不生效）
+# 17 3 * * * CN1_AK=xxx CN1_SK=xxx INTL1_AK=xxx INTL1_SK=xxx CF_TOKEN_1=xxx CF_ACCOUNT_ID_1=xxx LE_WORKING_DIR=/root/.acme.sh cd /opt/cert-manager && /opt/cert-manager/venv/bin/python3 certmgr.py --config /opt/cert-manager/config/certs.yaml >> /opt/cert-manager/logs/certmgr.log 2>&1
 ```
 
 ## 验证

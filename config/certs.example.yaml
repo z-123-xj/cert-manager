@@ -1,16 +1,19 @@
 # cert-manager 配置示例
-# 复制为 certs.yaml 后填写；也支持用环境变量 ${VAR} 注入（如 docker-compose 的 environment）。
+# 复制为 certs.yaml 后填写；也支持用环境变量 ${VAR} 注入 AK。
 #
 # 账号命名约定：阿里云按「站点+序号」cn1/intl1/cn2/intl2...；Cloudflare 按 cloudflare1/cloudflare2...
-# 每个域名的「DNS 验证方式」与「CDN 部署账号」相互独立：
-#   - dns:            aliyun（阿里云 DNS，acme.sh 自动加 _acme-challenge TXT）/ cloudflare（CF 加 TXT）
-#   - dns_account:    dns=aliyun 引用 accounts 的 key；dns=cloudflare 引用 cloudflare 的命名子账号
-#   - deploy_account: 证书上传并绑定到哪个阿里云账号（accounts 的 key）下的 CDN
-# 例：DNS 在 Cloudflare、CDN 在阿里云国际站，完全支持。
+#
+# 配置分两部分：
+#   certificates:   要签发的证书（可泛域名 *.example.com；extra_domains 可把裸域等并入同一张证书）
+#   dcdn_domains:   具体的 DCDN 加速域名，程序自动匹配「能覆盖它的证书」
+#
+# 匹配规则：DCDN 域名优先精确匹配，否则匹配最长的泛域名后缀。
+#   *.example.com 覆盖 www.example.com / api.example.com，但不覆盖裸域 example.com
+#   （如需裸域也走同一张证书，给证书加 extra_domains: ["example.com"]，或用两张证书分别签）
 
 accounts:
-  # 阿里云账号：既可用于「DNS 验证」（dns=aliyun），也可用于「部署」（上传证书+绑定 CDN）
-  # 可任意增减 key（cn1 / intl1 / cn2 / intl2 ...），域名用 dns_account / deploy_account 引用
+  # 阿里云账号：既可用于「DNS 验证」（dns=aliyun），也可用于「部署」（上传证书+绑定 DCDN）
+  # 可任意增减 key（cn1 / intl1 / cn2 / intl2 ...），证书用 dns_account、域名用 deploy_account 引用
   cn1:
     access_key: "${CN1_AK}"
     access_secret: "${CN1_SK}"
@@ -27,8 +30,8 @@ accounts:
     access_secret: "${CN2_SK}"
     region: "cn-hangzhou"
 
-# Cloudflare DNS 验证凭证（仅当某域名 dns=cloudflare 时需要）
-# 支持多账号：每个命名子账号一组 api_token；域名用 dns_account 指定用哪一个
+# Cloudflare DNS 验证凭证（仅当某证书 dns=cloudflare 时需要）
+# 支持多账号：每个命名子账号一组 api_token；证书用 dns_account 指定用哪一个
 cloudflare:
   cloudflare1:                      # 第一个 Cloudflare 账号
     api_token: "${CF_TOKEN_1}"      # -> acme.sh 的 CF_Token
@@ -39,37 +42,27 @@ cloudflare:
     api_token: "${CF_TOKEN_2}"
     account_id: "${CF_ACCOUNT_ID_2}"
 
-domains:
-  # name:           要签证的域名（= 你要替换证书的 CDN 加速域名）
-  # dns:            验证方式 aliyun / cloudflare
-  # dns_account:    具体用哪个 DNS 账号（aliyun -> accounts 的 key；cloudflare -> cloudflare 的命名子账号）
-  # deploy_account: 证书上传 + 绑定到哪个阿里云账号（accounts 的 key）的 CDN
-  # cdn_domain:     绑定的 CDN 加速域名，默认等于 name
-
-  # 例1：DNS 在国内站阿里云、CDN 也在国内站
-  - name: "example.com"
+# 要签发的证书（每个只签发一次，可被多个 DCDN 域名共用）
+certificates:
+  # 例1：国内站签一张泛域名证书，并用 extra_domains 把裸域并入同一张证书
+  - name: "*.example.com"
     dns: aliyun
     dns_account: cn1
-    deploy_account: cn1
-    cdn_domain: "example.com"
+    extra_domains:
+      - "example.com"
 
-  # 例2：DNS 在 Cloudflare1、CDN 在阿里云国际站（跨提供方）
-  - name: "cf-example.org"
+  # 例2：Cloudflare 验证、签一张泛域名证书（部署到国际站）
+  - name: "*.example.org"
     dns: cloudflare
     dns_account: cloudflare1
-    deploy_account: intl1
-    cdn_domain: "cf-example.org"
 
-  # 例3：DNS 在 Cloudflare2、CDN 在第三个阿里云账号 cn2
-  - name: "cf-team2.net"
-    dns: cloudflare
-    dns_account: cloudflare2
-    deploy_account: cn2
-    cdn_domain: "cf-team2.net"
-
-  # 例4：DNS 在 cn2 阿里云、CDN 在国际站
-  - name: "www.example.net"
-    dns: aliyun
-    dns_account: cn2
+# 具体的 DCDN 加速域名，自动匹配上面能覆盖它的证书
+dcdn_domains:
+  - domain: "www.example.com"      # 匹配 *.example.com（由 cn1 部署）
+    deploy_account: cn1
+  - domain: "api.example.com"      # 匹配 *.example.com
+    deploy_account: cn1
+  - domain: "example.com"          # 匹配 *.example.com 的 extra_domains（裸域）
+    deploy_account: cn1
+  - domain: "www.example.org"      # 匹配 *.example.org（DNS 在 CF，部署在国际站）
     deploy_account: intl1
-    cdn_domain: "www.example.net"

@@ -5,9 +5,14 @@
 签发成功后：
   1. 上传到阿里云 SSL 证书服务（CAS）
   2. 绑定到对应 DCDN 加速域名
-  3. 清理该域名在阿里云上的旧证书（保留刚上传的）
+  3. 清理该证书在阿里云上的旧版本（保留刚上传的）
 
-支持国内站 / 国际站两套阿里云账号部署；DNS 验证可分别走阿里云 DNS 或 Cloudflare（按域名配置）。
+配置分两部分：
+  - certificates:   要签发的证书（可泛域名 *.example.com；extra_domains 可把裸域等并入同一张证书）
+  - dcdn_domains:   具体的 DCDN 加速域名，自动匹配上面「能覆盖它的证书」
+每个证书只签发一次，可被多个 DCDN 域名共用（按「证书 + 部署账号」分组，每组只上传一次）。
+
+支持国内站 / 国际站两套阿里云账号部署；DNS 验证可分别走阿里云 DNS 或 Cloudflare（按证书配置）。
 告警（Prometheus / 到期前两周）后续接入，本脚本只负责签发与替换。
 
 依赖：见 requirements.txt
@@ -34,36 +39,13 @@ LE_DIR = os.environ.get("LE_WORKING_DIR", "/acme.sh")
 STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state")
 
 
-def cert_fingerprint(path):
-    """计算证书文件 sha256，用于判断是否需要重新部署。"""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def load_deploy_state(domain):
-    p = os.path.join(STATE_DIR, f"{domain}.state")
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
-
-
-def save_deploy_state(domain, val):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(os.path.join(STATE_DIR, f"{domain}.state"), "w", encoding="utf-8") as f:
-        f.write(val)
-
-
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
 # ----------------------------- 配置加载 -----------------------------
 def expand_env(obj):
-    """递归把配置里的 ${VAR} / $VAR 用环境变量替换（支持 docker-compose 注入 AK）。"""
+    """递归把配置里的 ${VAR} / $VAR 用环境变量替换。"""
     if isinstance(obj, str):
         return re.sub(r"\$\{([^}]+)\}|\$(\w+)",
                       lambda m: os.environ.get(m.group(1) or m.group(2), ""), obj)
@@ -85,18 +67,50 @@ def cert_paths(domain):
     return os.path.join(base, "fullchain.cer"), os.path.join(base, domain + ".key")
 
 
+# ----------------------------- 部署状态（指纹跳过） -----------------------------
+def _safe_key(k):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", k)
+
+
+def cert_fingerprint(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_deploy_state(key):
+    p = os.path.join(STATE_DIR, f"{_safe_key(key)}.state")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
+
+def save_deploy_state(key, val):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, f"{_safe_key(key)}.state"), "w", encoding="utf-8") as f:
+        f.write(val)
+
+
 # ----------------------------- acme.sh 签发 -----------------------------
-def run_acme(domain, dns_arg, env, renew):
+def run_acme(main_domain, extra_domains, dns_arg, env, renew):
     """调用 acme.sh 签发 / 续期。
-    dns_arg: 验证方式，如 dns_ali / dns_cf
-    env:     对应 DNS 提供方的凭证环境变量（如 ALI_KEY/ALI_SECRET 或 CF_Token）
+    main_domain:   主域名（证书目录与匹配以此命名）
+    extra_domains: SAN 附加域名列表（如裸域，需与主域同验证方式）
+    dns_arg:       验证方式 dns_ali / dns_cf
+    env:           对应 DNS 提供方的凭证环境变量
     """
     env = dict(os.environ, **env)
     if renew:
-        cmd = ["acme.sh", "--renew", "--no-cron", "-d", domain]
+        cmd = ["acme.sh", "--renew", "--no-cron", "-d", main_domain]
     else:
-        cmd = ["acme.sh", "--issue", "--dns", dns_arg, "--no-cron", "-d", domain]
-    log(f"acme.sh {'renew' if renew else 'issue'} {domain}")
+        cmd = ["acme.sh", "--issue", "--dns", dns_arg, "--no-cron", "-d", main_domain]
+        for d in (extra_domains or []):
+            cmd += ["-d", d]
+    log(f"acme.sh {'renew' if renew else 'issue'} {main_domain}" +
+        (f" +SAN {extra_domains}" if extra_domains else ""))
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     out = (r.stdout or "") + (r.stderr or "")
     log(out[-2000:])  # 只打印末尾，避免刷屏
@@ -112,64 +126,9 @@ def make_client(account):
     return AcsClient(account["access_key"], account["access_secret"], region)
 
 
-# ----------------------------- 上传 + 绑定 + 删旧 -----------------------------
-def upload_and_bind(domain, cdn_domain, account, force=False, deploy_name=None):
-    cert_file, key_file = cert_paths(domain)
-    if not (os.path.exists(cert_file) and os.path.exists(key_file)):
-        log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
-        return False
-
-    # 证书与部署目标都未变化则跳过，避免每天重复上传/绑定/删旧（只有续签或改配置才同步）
-    if not force:
-        fp = cert_fingerprint(cert_file)
-        saved = load_deploy_state(domain)
-        if saved and saved == f"{fp}|{cdn_domain}|{deploy_name}":
-            log(f"[SKIP] {domain} 证书与部署目标未变化，跳过上传/绑定")
-            return True
-
-    cert_pem = open(cert_file, "r", encoding="utf-8").read()
-    key_pem = open(key_file, "r", encoding="utf-8").read()
-    client = make_client(account)
-    ts = int(time.time())
-
-    # 1) 上传到阿里云 SSL 证书服务
-    req = CreateUserCertificateRequest.CreateUserCertificateRequest()
-    req.set_accept_format("json")
-    req.set_Name(f"auto-{domain}-{ts}")
-    req.set_Cert(cert_pem)
-    req.set_Key(key_pem)
-    try:
-        resp = json.loads(client.do_action_with_exception(req))
-    except Exception as e:
-        log(f"[ERROR] 上传证书到阿里云失败: {e}")
-        return False
-    cert_id = resp.get("CertId")
-    if not cert_id:
-        log(f"[ERROR] 上传证书未返回 CertId: {resp}")
-        return False
-    log(f"已上传证书 cert_id={cert_id}")
-
-    # 2) 绑定到 CDN 加速域名
-    req2 = SetDcdnDomainSSLCertificateRequest()
-    req2.set_accept_format("json")
-    req2.set_DomainName(cdn_domain)
-    req2.set_CertName(f"auto-{domain}-{ts}")
-    req2.set_CertId(str(cert_id))
-    req2.set_SSLProtocol("on")
-    try:
-        client.do_action_with_exception(req2)
-    except Exception as e:
-        log(f"[ERROR] 绑定 CDN {cdn_domain} 失败: {e}")
-        return False
-    log(f"已绑定 CDN {cdn_domain} -> cert_id={cert_id}")
-
-    # 3) 清理同域名旧证书（保留刚上传的）
-    delete_old_certs(client, domain, keep=cert_id)
-    save_deploy_state(domain, f"{cert_fingerprint(cert_file)}|{cdn_domain}|{deploy_name}")
-    return True
-
-
-def delete_old_certs(client, domain, keep):
+# ----------------------------- 删除旧证书 -----------------------------
+def delete_old_certs(client, cert_name, keep):
+    """删除该证书名前缀的旧版本（auto-<cert_name>-*），保留 keep 那一份。"""
     req = DescribeUserCertificateListRequest()
     req.set_accept_format("json")
     req.set_CurrentPage(1)
@@ -181,7 +140,7 @@ def delete_old_certs(client, domain, keep):
         return
     raw = resp.get("CertificateList", {})
     certs = raw.get("Certificate", []) if isinstance(raw, dict) else (raw or [])
-    prefix = f"auto-{domain}"
+    prefix = f"auto-{cert_name}"
     for c in certs:
         name = c.get("Name", "")
         cid = c.get("CertId")
@@ -196,70 +155,169 @@ def delete_old_certs(client, domain, keep):
                 log(f"[WARN] 删除旧证书 {cid} 失败: {e}")
 
 
+# ----------------------------- 证书覆盖匹配 -----------------------------
+def cert_covers(cert, domain):
+    """domain 是否被该证书覆盖（证书名或 extra_domains 之一）。"""
+    names = [cert["name"]] + list(cert.get("extra_domains", []) or [])
+    for n in names:
+        if n == domain:
+            return True
+        if n.startswith("*."):
+            suf = n[2:]
+            if domain == suf or domain.endswith("." + suf):
+                return True
+    return False
+
+
+def match_cert(domain, certs):
+    """为 DCDN 域名选证书：精确匹配优先，否则选最长泛域名后缀。"""
+    exact = None
+    best = None
+    best_len = -1
+    for c in certs:
+        if not cert_covers(c, domain):
+            continue
+        if c["name"] == domain or domain in (c.get("extra_domains") or []):
+            exact = c
+        sufs = [n[2:] for n in ([c["name"]] + list(c.get("extra_domains", []) or [])) if n.startswith("*.")]
+        if sufs:
+            suf = max(sufs)
+            if len(suf) > best_len:
+                best = c
+                best_len = len(suf)
+    return exact or best
+
+
+# ----------------------------- 签发单个证书 -----------------------------
+def issue_certificate(cert, accounts, cf, force):
+    name = cert["name"]
+    dns = cert.get("dns", "aliyun")
+    if dns == "aliyun":
+        acc_name = cert.get("dns_account") or cert.get("account", "cn")
+        acc = accounts.get(acc_name)
+        if not acc:
+            log(f"[ERROR] 证书 {name} dns=aliyun 但 DNS 账号 {acc_name} 不存在，跳过")
+            return
+        acme_env = {"ALI_KEY": acc["access_key"], "ALI_SECRET": acc["access_secret"]}
+        dns_arg = "dns_ali"
+    elif dns == "cloudflare":
+        # cloudflare 支持多账号（命名子字典）；也兼容旧的「单账号直接写在 cloudflare 下」写法
+        cf_name = cert.get("dns_account")
+        cf_cfg = None
+        if isinstance(cf, dict):
+            if cf_name and cf_name in cf and isinstance(cf[cf_name], dict):
+                cf_cfg = cf[cf_name]
+            elif not cf_name and "api_token" in cf:
+                cf_cfg = cf
+        if not isinstance(cf_cfg, dict) or not cf_cfg.get("api_token"):
+            log(f"[ERROR] 证书 {name} dns=cloudflare 凭证缺失（dns_account={cf_name}），跳过")
+            return
+        acme_env = {"CF_Token": cf_cfg["api_token"]}
+        if cf_cfg.get("account_id"):
+            acme_env["CF_Account_ID"] = cf_cfg["account_id"]
+        if cf_cfg.get("email"):
+            acme_env["CF_Email"] = cf_cfg["email"]
+        dns_arg = "dns_cf"
+    else:
+        log(f"[ERROR] 证书 {name} 不支持的 dns={dns}，跳过")
+        return
+    cert_file, _ = cert_paths(name)
+    exists = os.path.exists(cert_file)
+    # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
+    run_acme(name, cert.get("extra_domains"), dns_arg, acme_env, renew=exists and not force)
+
+
+# ----------------------------- 部署一组（证书 + 账号） -----------------------------
+def deploy_cert_group(cert, account, acc_name, domains, force):
+    cert_name = cert["name"]
+    cert_file, key_file = cert_paths(cert_name)
+    if not (os.path.exists(cert_file) and os.path.exists(key_file)):
+        log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
+        return
+    state_key = f"{cert_name}|{acc_name}"
+    # 证书未变化且绑定域名列表未变则跳过，避免每天重复上传/绑定/删旧
+    if not force:
+        fp = cert_fingerprint(cert_file)
+        saved = load_deploy_state(state_key)
+        if saved and saved == f"{fp}|{','.join(sorted(domains))}":
+            log(f"[SKIP] 证书 {cert_name} 在账号 {acc_name} 未变化，跳过上传/绑定")
+            return
+    cert_pem = open(cert_file, "r", encoding="utf-8").read()
+    key_pem = open(key_file, "r", encoding="utf-8").read()
+    client = make_client(account)
+    ts = int(time.time())
+    # 1) 上传到阿里云 SSL 证书服务（该账号下只传一次）
+    req = CreateUserCertificateRequest.CreateUserCertificateRequest()
+    req.set_accept_format("json")
+    req.set_Name(f"auto-{cert_name}-{ts}")
+    req.set_Cert(cert_pem)
+    req.set_Key(key_pem)
+    try:
+        resp = json.loads(client.do_action_with_exception(req))
+    except Exception as e:
+        log(f"[ERROR] 上传证书到阿里云失败: {e}")
+        return
+    cert_id = resp.get("CertId")
+    if not cert_id:
+        log(f"[ERROR] 上传证书未返回 CertId: {resp}")
+        return
+    log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}）")
+    # 2) 绑定到该组所有 DCDN 加速域名
+    for domain in domains:
+        req2 = SetDcdnDomainSSLCertificateRequest()
+        req2.set_accept_format("json")
+        req2.set_DomainName(domain)
+        req2.set_CertName(f"auto-{cert_name}-{ts}")
+        req2.set_CertId(str(cert_id))
+        req2.set_SSLProtocol("on")
+        try:
+            client.do_action_with_exception(req2)
+            log(f"已绑定 DCDN {domain} -> cert_id={cert_id}")
+        except Exception as e:
+            log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
+    # 3) 清理该证书在账号下的旧版本
+    delete_old_certs(client, cert_name, keep=cert_id)
+    save_deploy_state(state_key, f"{cert_fingerprint(cert_file)}|{','.join(sorted(domains))}")
+
+
 # ----------------------------- 主流程 -----------------------------
 def process(cfg, force=False):
     accounts = cfg.get("accounts", {})
     cf = cfg.get("cloudflare", {})
-    domains = cfg.get("domains", [])
-    for d in domains:
-        name = d["name"]
-        dns = d.get("dns", "aliyun")
+    certs = cfg.get("certificates", [])
+    dcdn_domains = cfg.get("dcdn_domains", [])
 
-        # 1) 解析 DNS 验证方式与对应凭证（与 CDN 部署账号相互独立）
-        if dns == "aliyun":
-            dns_acc_name = d.get("dns_account") or d.get("deploy_account") or d.get("account", "cn")
-            dns_acc = accounts.get(dns_acc_name)
-            if not dns_acc:
-                log(f"[ERROR] 域名 {name} dns=aliyun 但 DNS 账号 {dns_acc_name} 不存在，跳过")
-                continue
-            acme_env = {
-                "ALI_KEY": dns_acc["access_key"],
-                "ALI_SECRET": dns_acc["access_secret"],
-            }
-            dns_arg = "dns_ali"
-        elif dns == "cloudflare":
-            # cloudflare 支持多账号（命名子字典）；也兼容旧的「单账号直接写在 cloudflare 下」写法
-            cf_name = d.get("dns_account")
-            cf_cfg = None
-            if isinstance(cf, dict):
-                if cf_name and cf_name in cf and isinstance(cf[cf_name], dict):
-                    cf_cfg = cf[cf_name]
-                elif not cf_name and "api_token" in cf:
-                    cf_cfg = cf
-            if not isinstance(cf_cfg, dict) or not cf_cfg.get("api_token"):
-                log(f"[ERROR] 域名 {name} dns=cloudflare 凭证缺失（dns_account={cf_name}），跳过")
-                continue
-            acme_env = {"CF_Token": cf_cfg["api_token"]}
-            if cf_cfg.get("account_id"):
-                acme_env["CF_Account_ID"] = cf_cfg["account_id"]
-            if cf_cfg.get("email"):
-                acme_env["CF_Email"] = cf_cfg["email"]
-            dns_arg = "dns_cf"
-        else:
-            log(f"[ERROR] 域名 {name} 不支持的 dns={dns}，跳过")
+    # 1) 签发所有 certificates（每个证书只签一次）
+    for c in certs:
+        issue_certificate(c, accounts, cf, force)
+
+    # 2) 为每个 DCDN 域名匹配证书，并按 (证书名, 部署账号) 分组
+    groups = {}
+    for dd in dcdn_domains:
+        domain = dd["domain"]
+        cert = match_cert(domain, certs)
+        if not cert:
+            log(f"[ERROR] DCDN 域名 {domain} 找不到匹配的证书，跳过")
             continue
-
-        # 2) 解析部署账号（证书上传 + 绑定 CDN）
-        deploy_acc_name = d.get("deploy_account") or d.get("account", "cn")
-        deploy_account = accounts.get(deploy_acc_name)
-        if not deploy_account:
-            log(f"[ERROR] 域名 {name} 指定的部署账号 {deploy_acc_name} 不存在，跳过")
+        acc_name = dd.get("deploy_account") or dd.get("account", "cn")
+        account = accounts.get(acc_name)
+        if not account:
+            log(f"[ERROR] DCDN 域名 {domain} 部署账号 {acc_name} 不存在，跳过")
             continue
-        cdn_domain = d.get("cdn_domain", name)
+        key = (cert["name"], acc_name)
+        groups.setdefault(key, {"cert": cert, "account": account, "acc_name": acc_name, "domains": []})
+        if domain not in groups[key]["domains"]:
+            groups[key]["domains"].append(domain)
 
-        # 3) 签发 / 续期 + 部署
-        cert_file, _ = cert_paths(name)
-        exists = os.path.exists(cert_file)
-        # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
-        run_acme(name, dns_arg, acme_env, renew=exists and not force)
-        # 部署：仅当证书内容或部署目标变化（或 --force）时才上传+绑定+删旧
-        upload_and_bind(name, cdn_domain, deploy_account, force=force, deploy_name=deploy_acc_name)
+    # 3) 每组上传一次 + 绑定组内所有域名 + 删旧
+    for key, g in groups.items():
+        deploy_cert_group(g["cert"], g["account"], g["acc_name"], g["domains"], force)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="/app/config/certs.yaml")
-    ap.add_argument("--force", action="store_true", help="强制重新签发并部署（跳过 acme.sh 续期判断）")
+    ap.add_argument("--config", default="config/certs.yaml")
+    ap.add_argument("--force", action="store_true", help="强制重新签发并部署（跳过 acme.sh 续期判断与指纹跳过）")
     args = ap.parse_args()
     if not os.path.exists(args.config):
         log(f"[ERROR] 配置文件不存在: {args.config}")
