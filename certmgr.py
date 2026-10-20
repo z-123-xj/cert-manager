@@ -143,7 +143,9 @@ def run_acme(domains, dns_arg, env, renew):
     if renew:
         cmd = base + ["--renew", "--no-cron", "-d", main]
     else:
-        cmd = base + ["--issue", "--dns", dns_arg, "--no-cron", "-d", main]
+        # 默认用 Let's Encrypt 作为 CA（无需注册邮箱/EAB，最适合脚本化）；
+        # 若想改用 ZeroSSL，去掉下面 --server 参数，并先执行一次 `acme.sh --register-account -m 你的邮箱`
+        cmd = base + ["--issue", "--server", "letsencrypt", "--dns", dns_arg, "--no-cron", "-d", main]
         for d in domains[1:]:
             cmd += ["-d", d]
     log(f"acme.sh {'renew' if renew else 'issue'} {main}" +
