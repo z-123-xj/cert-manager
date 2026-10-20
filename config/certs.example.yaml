@@ -5,11 +5,7 @@
 #
 # 配置分两部分：
 #   certificates:   要签发的证书（可泛域名 *.example.com；extra_domains 可把裸域等并入同一张证书）
-#   dcdn_domains:   具体的 DCDN 加速域名，程序自动匹配「能覆盖它的证书」
-#
-# 匹配规则：DCDN 域名优先精确匹配，否则匹配最长的泛域名后缀。
-#   *.example.com 覆盖 www.example.com / api.example.com，但不覆盖裸域 example.com
-#   （如需裸域也走同一张证书，给证书加 extra_domains: ["example.com"]，或用两张证书分别签）
+#   dcdn_domains:   具体的 DCDN 加速域名，可显式用 cert 指定用哪张证书（不写则自动按后缀匹配）
 
 accounts:
   # 阿里云账号：既可用于「DNS 验证」（dns=aliyun），也可用于「部署」（上传证书+绑定 DCDN）
@@ -43,8 +39,12 @@ cloudflare:
     account_id: "${CF_ACCOUNT_ID_2}"
 
 # 要签发的证书（每个只签发一次，可被多个 DCDN 域名共用）
+# 证书「主名 name」既作为引用标识，也作为 acme.sh 本地目录名。
+# 同时覆盖裸域+泛域的常见写法（二选一）：
+#   写法 A（推荐，主题即泛域）：name: "*.example.com" + extra_domains: ["example.com"]
+#   写法 B（主题即裸域）：      name: "example.com"  + extra_domains: ["*.example.com"]
 certificates:
-  # 例1：国内站签一张泛域名证书，并用 extra_domains 把裸域并入同一张证书
+  # 例1：国内站签一张证书，同时覆盖裸域 example.com 与泛域 *.example.com（写法 A）
   - name: "*.example.com"
     dns: aliyun
     dns_account: cn1
@@ -56,13 +56,21 @@ certificates:
     dns: cloudflare
     dns_account: cloudflare1
 
-# 具体的 DCDN 加速域名，自动匹配上面能覆盖它的证书
+# 具体的 DCDN 加速域名
+#   deploy_account：证书上传并绑定到哪个阿里云账号
+#   cert（可选）：显式指定用 certificates 里哪张证书（填其 name）。
+#        多级子域（如 app.www.example.com）或存在多张证书时，显式指定可避免自动匹配歧义；
+#        不写 cert 则回退为「按后缀自动匹配能覆盖它的证书」。
 dcdn_domains:
-  - domain: "www.example.com"      # 匹配 *.example.com（由 cn1 部署）
+  - domain: "www.example.com"
     deploy_account: cn1
-  - domain: "api.example.com"      # 匹配 *.example.com
+    cert: "*.example.com"          # 显式指定证书（也可用写法 B 的 name: "example.com"）
+  - domain: "api.example.com"
     deploy_account: cn1
-  - domain: "example.com"          # 匹配 *.example.com 的 extra_domains（裸域）
+    cert: "*.example.com"
+  - domain: "example.com"          # 裸域，由例1 证书的 extra_domains 覆盖
     deploy_account: cn1
+    cert: "*.example.com"
   - domain: "www.example.org"      # 匹配 *.example.org（DNS 在 CF，部署在国际站）
     deploy_account: intl1
+    cert: "*.example.org"

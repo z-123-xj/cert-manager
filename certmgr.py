@@ -292,13 +292,24 @@ def process(cfg, force=False):
         issue_certificate(c, accounts, cf, force)
 
     # 2) 为每个 DCDN 域名匹配证书，并按 (证书名, 部署账号) 分组
+    #    优先用 dcdn 项里显式指定的 cert（无歧义、可控）；未指定时回退到自动后缀匹配
     groups = {}
     for dd in dcdn_domains:
         domain = dd["domain"]
-        cert = match_cert(domain, certs)
-        if not cert:
-            log(f"[ERROR] DCDN 域名 {domain} 找不到匹配的证书，跳过")
-            continue
+        cert = None
+        cert_name = dd.get("cert")
+        if cert_name:
+            cert = next((c for c in certs if c["name"] == cert_name), None)
+            if not cert:
+                log(f"[ERROR] DCDN 域名 {domain} 指定的证书 {cert_name} 不存在，跳过")
+                continue
+            if not cert_covers(cert, domain):
+                log(f"[WARN] DCDN 域名 {domain} 指定的证书 {cert_name} 不含该域名，绑定可能失败")
+        else:
+            cert = match_cert(domain, certs)
+            if not cert:
+                log(f"[ERROR] DCDN 域名 {domain} 找不到匹配的证书，跳过")
+                continue
         acc_name = dd.get("deploy_account") or dd.get("account", "cn")
         account = accounts.get(acc_name)
         if not account:

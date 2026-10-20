@@ -57,8 +57,9 @@ cp config/certs.example.yaml config/certs.yaml
   每个证书有两条独立配置：
   - `dns`（验证方）：`aliyun` 用 `accounts` 里对应 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下某个命名子账号的 API Token；
   - `dns_account`：验证用的账号（`aliyun` → `accounts` 的 key；`cloudflare` → `cloudflare` 的命名子账号）。
-- **`dcdn_domains`**：具体的 DCDN 加速域名，程序**自动匹配「能覆盖它的证书」**（精确优先，否则最长泛域名后缀）。
-  每项用 `deploy_account` 指定证书上传并绑定到哪个阿里云账号（`accounts` 的 key）下的 DCDN。
+- **`dcdn_domains`**：具体的 DCDN 加速域名。每项用 `deploy_account` 指定证书上传并绑定到哪个阿里云账号（`accounts` 的 key）下的 DCDN；
+  可选 `cert` 字段**显式指定用哪张证书**（填 `certificates` 里某项的 `name`）。在存在多级子域（如 `app.www.example.com`）或多张证书时，
+  显式指定能避免自动匹配的歧义；不写 `cert` 则回退为「按后缀自动匹配能覆盖它的证书」（精确优先，否则最长泛域名后缀）。
 
 两者互不影响——DNS 在 Cloudflare、DCDN 在阿里云的域名同样支持。每个证书只签发一次，可被多个 DCDN 域名共用（按「证书 + 部署账号」分组，每组只上传一次）。
 
