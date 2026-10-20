@@ -318,9 +318,17 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         req2.set_accept_format("json")
         req2.set_DomainName(domain)
         req2.set_CertName(f"auto-{cert_name}-{ts}")
-        req2.set_Cert(cert_pem)
-        req2.set_SSLPri(key_pem)
         req2.set_SSLProtocol("on")
+        # 优先用 CAS 证书 ID 引用（接口参数为 CertIdentifier，最规范、无需再传私钥）；
+        # 个别 SDK 版本只有 set_CertId，则退而直接传证书内容（Cert + SSLPri）兜底
+        if hasattr(req2, "set_CertIdentifier"):
+            req2.set_CertIdentifier(str(cert_id))
+        elif hasattr(req2, "set_CertId"):
+            req2.set_CertId(str(cert_id))
+            if hasattr(req2, "set_Cert"):
+                req2.set_Cert(cert_pem)
+            if hasattr(req2, "set_SSLPri"):
+                req2.set_SSLPri(key_pem)
         try:
             client.do_action_with_exception(req2)
             log(f"已绑定 DCDN {domain} -> cert_id={cert_id}")
