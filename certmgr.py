@@ -20,6 +20,7 @@ import time
 import subprocess
 import argparse
 import yaml
+import hashlib
 
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcas.request.v20180713 import (
@@ -30,6 +31,30 @@ from aliyunsdkcas.request.v20180713 import (
 from aliyunsdkdcdn.request.v20180510 import SetDcdnDomainSSLCertificateRequest
 
 LE_DIR = os.environ.get("LE_WORKING_DIR", "/acme.sh")
+STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state")
+
+
+def cert_fingerprint(path):
+    """计算证书文件 sha256，用于判断是否需要重新部署。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_deploy_state(domain):
+    p = os.path.join(STATE_DIR, f"{domain}.state")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
+
+def save_deploy_state(domain, val):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, f"{domain}.state"), "w", encoding="utf-8") as f:
+        f.write(val)
 
 
 def log(msg):
@@ -88,11 +113,19 @@ def make_client(account):
 
 
 # ----------------------------- 上传 + 绑定 + 删旧 -----------------------------
-def upload_and_bind(domain, cdn_domain, account):
+def upload_and_bind(domain, cdn_domain, account, force=False, deploy_name=None):
     cert_file, key_file = cert_paths(domain)
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
         return False
+
+    # 证书与部署目标都未变化则跳过，避免每天重复上传/绑定/删旧（只有续签或改配置才同步）
+    if not force:
+        fp = cert_fingerprint(cert_file)
+        saved = load_deploy_state(domain)
+        if saved and saved == f"{fp}|{cdn_domain}|{deploy_name}":
+            log(f"[SKIP] {domain} 证书与部署目标未变化，跳过上传/绑定")
+            return True
 
     cert_pem = open(cert_file, "r", encoding="utf-8").read()
     key_pem = open(key_file, "r", encoding="utf-8").read()
@@ -132,6 +165,7 @@ def upload_and_bind(domain, cdn_domain, account):
 
     # 3) 清理同域名旧证书（保留刚上传的）
     delete_old_certs(client, domain, keep=cert_id)
+    save_deploy_state(domain, f"{cert_fingerprint(cert_file)}|{cdn_domain}|{deploy_name}")
     return True
 
 
@@ -218,8 +252,8 @@ def process(cfg, force=False):
         exists = os.path.exists(cert_file)
         # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
         run_acme(name, dns_arg, acme_env, renew=exists and not force)
-        # 部署幂等：每次都重新上传 + 绑定 + 删旧，保证 CDN 持有最新可用证书
-        upload_and_bind(name, cdn_domain, deploy_account)
+        # 部署：仅当证书内容或部署目标变化（或 --force）时才上传+绑定+删旧
+        upload_and_bind(name, cdn_domain, deploy_account, force=force, deploy_name=deploy_acc_name)
 
 
 def main():
