@@ -137,7 +137,11 @@ def run_acme(domains, dns_arg, env, renew):
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     out = (r.stdout or "") + (r.stderr or "")
     log(out[-2000:])  # 只打印末尾，避免刷屏
-    return r.returncode == 0, out
+    # acme.sh 在 renew 未到期时会打印 "Skipping" 且（部分版本）以非零退出码结束；
+    # 这不算失败（证书仍有效，可直接部署），故视为成功。真正签发失败（如 DNS 错误）
+    # 的 out 里不会有 "Skipping"，仍会判为失败。
+    ok = r.returncode == 0 or "Skipping" in out
+    return ok, out
 
 
 # ----------------------------- 阿里云客户端 -----------------------------
