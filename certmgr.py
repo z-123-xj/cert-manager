@@ -254,16 +254,15 @@ def issue_certificate(cert, accounts, cf, force):
             log(f"[ERROR] 证书 {name} dns=aliyun 但 DNS 账号 {acc_name} 不存在，跳过")
             return
         # acme.sh 的 dns_ali 插件读取的是 ALI_Key / ALI_Secret（注意大小写），不是 ALI_KEY。
-        # 仅当配置里存在真实密钥时才写入环境变量；否则不写，让 acme.sh 沿用其自身已注册
-        # 的 DNS 账号（account.conf 或当前进程 os.environ），避免空字符串覆盖真实凭证。
-        acme_env = {}
-        k, s = acc.get("access_key"), acc.get("access_secret")
-        if k and s:
-            acme_env["ALI_Key"] = k
-            acme_env["ALI_Secret"] = s
-        else:
-            log(f"[INFO] 证书 {name} 的 DNS 账号 {acc_name} 未配置 access_key/access_secret，"
-                f"将复用 acme.sh 已注册的账号凭证（如需按账号精确区分请补齐密钥）")
+        # 必须显式使用配置里的凭证；若未配置则直接报错，不静默回退到 acme.sh 默认账号。
+        k = acc.get("access_key")
+        s = acc.get("access_secret")
+        if not (k and s):
+            log(f"[ERROR] 证书 {name} 的 DNS 账号 {acc_name} 未配置 access_key/access_secret，跳过签发")
+            return
+        acme_env = {"ALI_Key": k, "ALI_Secret": s}
+        # 调试用：打印账号名 + 脱敏 access_key，便于确认实际使用的是哪个 DNS 账号
+        log(f"[DEBUG] 证书 {name} 使用 DNS 账号 {acc_name} 签发（ALI_Key={k[:6]}****，请核对是否为预期账号）")
         dns_arg = "dns_ali"
     elif dns == "cloudflare":
         # cloudflare 支持多账号（命名子字典）；也兼容旧的「单账号直接写在 cloudflare 下」写法
