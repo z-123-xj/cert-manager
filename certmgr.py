@@ -311,15 +311,7 @@ def get_dcdn_cert(client, domain):
         return None
     infos = resp.get("CertInfos") or {}
     items = infos.get("CertInfo", []) if isinstance(infos, dict) else (infos or [])
-    info = items[0] if isinstance(items, list) and items else None
-    if info is not None:
-        sslpub = info.get("SSLPub") or info.get("Cert") or ""
-        log(f"[DEBUG] {domain} DCDN查询返回: CertName={info.get('CertName')!r}, "
-            f"SSLProtocol={info.get('SSLProtocol')!r}, 字段键={list(info.keys())}, "
-            f"SSLPub前50={sslpub[:50]!r}")
-    else:
-        log(f"[DEBUG] {domain} DCDN查询返回: 无绑定证书信息 (resp键={list(resp.keys())})")
-    return info
+    return items[0] if isinstance(items, list) and items else None
 
 
 def _leaf_pem(pem_text):
@@ -364,22 +356,12 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         bound = get_dcdn_cert(client, domain)
         # 必须精确匹配正规证书名（cert_label）才算已正确绑定；若当前绑定的是带时间戳的
         # alt 名（acme_xxx_2026-10-21_1697...），视为未对齐，需重新绑定到正规名。
-        if not force and bound:
-            name_ok = bound.get("CertName", "") == cert_label
-            proto_ok = str(bound.get("SSLProtocol")) == "on"
-            bleaf = _leaf_pem(bound.get("SSLPub") or "")
-            content_ok = bleaf == local_pem
-            if name_ok and proto_ok and content_ok:
-                log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
-                continue
-            why = []
-            if not name_ok:
-                why.append(f"CertName={bound.get('CertName')!r}!=正规名{cert_label!r}")
-            if not proto_ok:
-                why.append(f"SSLProtocol={bound.get('SSLProtocol')!r}")
-            if not content_ok:
-                why.append(f"内容不等[local前40={local_pem[:40]!r}|bound前40={bleaf[:40]!r}]")
-            log(f"[DEBUG] {domain} 判定需重新绑定: {'; '.join(why)}")
+        if (not force and bound
+                and bound.get("CertName", "") == cert_label
+                and str(bound.get("SSLProtocol")) == "on"
+                and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
+            log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
+            continue
         to_bind.append(domain)
     if not to_bind:
         return
@@ -414,49 +396,30 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     if reused:
         log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
     # 2) 绑定到需要更新的 DCDN 加速域名
-    # 绑定策略（存在就换上，不存在就上传）：
-    #   a. 证书已在 CAS（cert_id 已知：查重复用或刚创建）→ 用 CertType=cas + CertIdentifier
-    #      引用绑定，不传内容 —— 这正是「把域名换绑到已有同名证书」的方式，不会撞同名；
-    #   b. 引用绑定失败/SDK 不支持 → 回退「自定义上传」绑定（传 SSLPub+SSLPri）；
-    #   c. 上传方式撞同名（CertNameAlreadyExists）→ SKIP 并提示手动处理（a 正常时不该走到）。
-    region = account.get("region", "cn-hangzhou")
-
-    def _bind(domain, cert_name, cas_cert_id=None):
+    # DCDN 的 SetDcdnDomainSSLCertificate 接口只能「上传内容绑定」，不支持「切换到已存在的
+    # 同名证书」（实测：不传内容会 SSLPri.MissingParameter，传同名内容会 CertNameAlreadyExists）。
+    # 因此仅在证书名无冲突时上传绑定；遇到同名冲突视为已部署并 SKIP，需在控制台手动改绑。
+    def _bind(domain, cert_name):
         r = SetDcdnDomainSSLCertificateRequest()
         r.set_accept_format("json")
         r.set_DomainName(domain)
         r.set_CertName(cert_name)
         r.set_SSLProtocol("on")
-        if cas_cert_id and hasattr(r, "set_CertType"):
-            # 引用 CAS 证书仓库中已有证书绑定（无需传内容）
-            r.set_CertType("cas")
-            if hasattr(r, "set_CertIdentifier"):
-                # CertIdentifier 格式如 27985918-cn-hangzhou（DCDN 控制台同款）
-                r.set_CertIdentifier(f"{cas_cert_id}-{region}")
-        else:
-            # 自定义上传方式：必须传证书内容
-            if hasattr(r, "set_SSLPub"):
-                r.set_SSLPub(cert_pem)
-            elif hasattr(r, "set_Cert"):
-                r.set_Cert(cert_pem)
-            if hasattr(r, "set_SSLPri"):
-                r.set_SSLPri(key_pem)
+        if hasattr(r, "set_SSLPub"):
+            r.set_SSLPub(cert_pem)
+        elif hasattr(r, "set_Cert"):
+            r.set_Cert(cert_pem)
+        if hasattr(r, "set_SSLPri"):
+            r.set_SSLPri(key_pem)
         client.do_action_with_exception(r)
 
     for domain in to_bind:
         try:
-            if cert_id:
-                try:
-                    _bind(domain, cert_label, cas_cert_id=cert_id)
-                    log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}（引用 CAS cert_id={cert_id}）")
-                    continue
-                except Exception as e1:
-                    log(f"[WARN] {domain} 引用 CAS 证书绑定失败（{e1}），回退上传内容绑定")
             _bind(domain, cert_label)
             log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}")
         except Exception as e:
             if "CertNameAlreadyExists" in str(e):
-                # 引用绑定不可用、上传又撞同名（接口不允许覆盖），只能提示手动处理
+                # DCDN 库已存在同名证书，接口不允许覆盖/切换引用，只能控制台手动改绑
                 log(f"[SKIP] DCDN 已存在同名证书 {cert_label}，跳过 {domain}"
                     f"（若 {domain} 未生效，请在 DCDN 控制台把该域名改绑到 {cert_label} 后重跑）")
             else:
