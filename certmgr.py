@@ -348,6 +348,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     if not to_bind:
         return
     # 1) 上传到阿里云 SSL 证书服务（同名先查重，存在则复用，避免 NameRepeat 重复创建）
+    reused = False
     cert_id = find_cert_id_by_name(client, cert_label)
     if not cert_id:
         req = CreateUserCertificateRequest()
@@ -362,13 +363,20 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
             # 同名已存在（NameRepeat）时回退查重复用，避免重复创建
             if "NameRepeat" in str(e):
                 cert_id = find_cert_id_by_name(client, cert_label)
+                if cert_id:
+                    reused = True
             if not cert_id:
                 log(f"[ERROR] 上传证书到阿里云失败: {e}")
                 return
+        if cert_id and not reused:
+            log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
+    else:
+        reused = True
     if not cert_id:
         log(f"[ERROR] 上传证书未返回 CertId")
         return
-    log(f"已就绪证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
+    if reused:
+        log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
     # 2) 绑定到需要更新的 DCDN 加速域名
     for domain in to_bind:
         req2 = SetDcdnDomainSSLCertificateRequest()
