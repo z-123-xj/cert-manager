@@ -262,7 +262,7 @@ def issue_certificate(cert, accounts, cf, force):
             return
         acme_env = {"ALI_Key": k, "ALI_Secret": s}
         # 调试用：打印账号名 + 脱敏 access_key，便于确认实际使用的是哪个 DNS 账号
-        log(f"[DEBUG] 证书 {name} 使用 DNS 账号 {acc_name} 签发（ALI_Key={k[:6]}****，请核对是否为预期账号）")
+        log(f"[DEBUG] 证书 {name} 使用 DNS 账号 {acc_name} 签发（ALI_Key={k[:10]}****，请核对阿里云控制台该账号 AccessKey 前缀是否一致）")
         dns_arg = "dns_ali"
     elif dns == "cloudflare":
         # cloudflare 支持多账号（命名子字典）；也兼容旧的「单账号直接写在 cloudflare 下」写法
