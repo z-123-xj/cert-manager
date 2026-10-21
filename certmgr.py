@@ -396,32 +396,51 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     if reused:
         log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
     # 2) 绑定到需要更新的 DCDN 加速域名
-    # DCDN "自定义上传" 方式直接传证书内容：参数名为 SSLPub(证书公钥) + SSLPri(私钥)。
-    # 该接口不支持"引用已有 CertName 绑定"（必须传内容，否则 SSLPri.MissingParameter），
-    # 且同名证书会报 CertNameAlreadyExists；故冲突时改用「原名+时间戳」唯一名重传创建。
-    def _bind(domain, cert_name):
+    # 绑定策略（存在就换上，不存在就上传）：
+    #   a. 证书已在 CAS（cert_id 已知：查重复用或刚创建）→ 用 CertType=cas + CertIdentifier
+    #      引用绑定，不传内容 —— 这正是「把域名换绑到已有同名证书」的方式，不会撞同名；
+    #   b. 引用绑定失败/SDK 不支持 → 回退「自定义上传」绑定（传 SSLPub+SSLPri）；
+    #   c. 上传方式撞同名（CertNameAlreadyExists）→ SKIP 并提示手动处理（a 正常时不该走到）。
+    region = account.get("region", "cn-hangzhou")
+
+    def _bind(domain, cert_name, cas_cert_id=None):
         r = SetDcdnDomainSSLCertificateRequest()
         r.set_accept_format("json")
         r.set_DomainName(domain)
         r.set_CertName(cert_name)
         r.set_SSLProtocol("on")
-        if hasattr(r, "set_SSLPub"):
-            r.set_SSLPub(cert_pem)
-        elif hasattr(r, "set_Cert"):
-            r.set_Cert(cert_pem)
-        if hasattr(r, "set_SSLPri"):
-            r.set_SSLPri(key_pem)
+        if cas_cert_id and hasattr(r, "set_CertType"):
+            # 引用 CAS 证书仓库中已有证书绑定（无需传内容）
+            r.set_CertType("cas")
+            if hasattr(r, "set_CertIdentifier"):
+                # CertIdentifier 格式如 27985918-cn-hangzhou（DCDN 控制台同款）
+                r.set_CertIdentifier(f"{cas_cert_id}-{region}")
+        else:
+            # 自定义上传方式：必须传证书内容
+            if hasattr(r, "set_SSLPub"):
+                r.set_SSLPub(cert_pem)
+            elif hasattr(r, "set_Cert"):
+                r.set_Cert(cert_pem)
+            if hasattr(r, "set_SSLPri"):
+                r.set_SSLPri(key_pem)
         client.do_action_with_exception(r)
 
     for domain in to_bind:
         try:
+            if cert_id:
+                try:
+                    _bind(domain, cert_label, cas_cert_id=cert_id)
+                    log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}（引用 CAS cert_id={cert_id}）")
+                    continue
+                except Exception as e1:
+                    log(f"[WARN] {domain} 引用 CAS 证书绑定失败（{e1}），回退上传内容绑定")
             _bind(domain, cert_label)
             log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}")
         except Exception as e:
             if "CertNameAlreadyExists" in str(e):
-                # DCDN 证书库已存在同名证书（接口不允许覆盖/引用绑定），视为已部署，跳过重复上传
-                log(f"[SKIP] DCDN 已存在同名证书 {cert_label}，复用已有跳过 {domain}"
-                    f"（若 {domain} 未生效，请在 DCDN 控制台绑定该证书或删除同名证书后重跑）")
+                # 引用绑定不可用、上传又撞同名（接口不允许覆盖），只能提示手动处理
+                log(f"[SKIP] DCDN 已存在同名证书 {cert_label}，跳过 {domain}"
+                    f"（若 {domain} 未生效，请在 DCDN 控制台把该域名改绑到 {cert_label} 后重跑）")
             else:
                 log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
