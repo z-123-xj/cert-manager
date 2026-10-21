@@ -378,35 +378,34 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     if reused:
         log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
     # 2) 绑定到需要更新的 DCDN 加速域名
+    # DCDN "自定义上传" 方式直接传证书内容：参数名为 SSLPub(证书公钥) + SSLPri(私钥)。
+    # 该接口不支持"引用已有 CertName 绑定"（必须传内容，否则 SSLPri.MissingParameter），
+    # 且同名证书会报 CertNameAlreadyExists；故冲突时改用「原名+时间戳」唯一名重传创建。
+    def _bind(domain, cert_name):
+        r = SetDcdnDomainSSLCertificateRequest()
+        r.set_accept_format("json")
+        r.set_DomainName(domain)
+        r.set_CertName(cert_name)
+        r.set_SSLProtocol("on")
+        if hasattr(r, "set_SSLPub"):
+            r.set_SSLPub(cert_pem)
+        elif hasattr(r, "set_Cert"):
+            r.set_Cert(cert_pem)
+        if hasattr(r, "set_SSLPri"):
+            r.set_SSLPri(key_pem)
+        client.do_action_with_exception(r)
+
     for domain in to_bind:
-        req2 = SetDcdnDomainSSLCertificateRequest()
-        req2.set_accept_format("json")
-        req2.set_DomainName(domain)
-        req2.set_CertName(cert_label)
-        req2.set_SSLProtocol("on")
-        # DCDN "自定义上传" 方式直接传证书内容：参数名为 SSLPub(证书公钥) + SSLPri(私钥)
-        if hasattr(req2, "set_SSLPub"):
-            req2.set_SSLPub(cert_pem)
-        elif hasattr(req2, "set_Cert"):
-            req2.set_Cert(cert_pem)
-        if hasattr(req2, "set_SSLPri"):
-            req2.set_SSLPri(key_pem)
         try:
-            client.do_action_with_exception(req2)
-            log(f"已绑定 DCDN {domain} -> cert_id={cert_id}")
+            _bind(domain, cert_label)
+            log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}")
         except Exception as e:
-            err = str(e)
-            if "CertNameAlreadyExists" in err:
-                # DCDN 证书库已存在同名证书：直接引用该 CertName 重新绑定（不再传内容）
-                log(f"[WARN] {domain} 的 DCDN 证书 {cert_label} 已存在，回退为引用已有证书绑定")
+            if "CertNameAlreadyExists" in str(e):
+                alt = f"{cert_label}_{int(time.time())}"
+                log(f"[WARN] {domain} 证书名 {cert_label} 在 DCDN 已存在，改用唯一名 {alt} 重试")
                 try:
-                    req3 = SetDcdnDomainSSLCertificateRequest()
-                    req3.set_accept_format("json")
-                    req3.set_DomainName(domain)
-                    req3.set_CertName(cert_label)
-                    req3.set_SSLProtocol("on")
-                    client.do_action_with_exception(req3)
-                    log(f"已绑定 DCDN {domain} -> 引用已有证书 {cert_label}")
+                    _bind(domain, alt)
+                    log(f"已绑定 DCDN {domain} -> 证书名 {alt}")
                 except Exception as e2:
                     log(f"[ERROR] 绑定 DCDN {domain} 失败: {e2}")
             else:
