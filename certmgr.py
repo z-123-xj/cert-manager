@@ -277,7 +277,11 @@ def issue_certificate(cert, accounts, cf, force):
     cert_file, _ = cert_paths(domains[0])
     exists = os.path.exists(cert_file)
     # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
-    run_acme(domains, dns_arg, acme_env, renew=exists and not force)
+    ok, _out = run_acme(domains, dns_arg, acme_env, renew=exists and not force)
+    if not ok:
+        log(f"[ERROR] acme.sh 签发 {name} 失败（dns_account={acc_name}）："
+            f"请检查该 DNS 账号凭证是否正确、是否拥有对应域名的解析权限")
+        return
 
 
 # ----------------------------- 部署一组（证书 + 账号） -----------------------------
@@ -401,13 +405,9 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
             log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}")
         except Exception as e:
             if "CertNameAlreadyExists" in str(e):
-                alt = f"{cert_label}_{int(time.time())}"
-                log(f"[WARN] {domain} 证书名 {cert_label} 在 DCDN 已存在，改用唯一名 {alt} 重试")
-                try:
-                    _bind(domain, alt)
-                    log(f"已绑定 DCDN {domain} -> 证书名 {alt}")
-                except Exception as e2:
-                    log(f"[ERROR] 绑定 DCDN {domain} 失败: {e2}")
+                # DCDN 证书库已存在同名证书（接口不允许覆盖/引用绑定），视为已部署，跳过重复上传
+                log(f"[SKIP] DCDN 已存在同名证书 {cert_label}，复用已有跳过 {domain}"
+                    f"（若 {domain} 未生效，请在 DCDN 控制台绑定该证书或删除同名证书后重跑）")
             else:
                 log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
