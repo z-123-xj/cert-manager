@@ -387,7 +387,22 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
             client.do_action_with_exception(req2)
             log(f"已绑定 DCDN {domain} -> cert_id={cert_id}")
         except Exception as e:
-            log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
+            err = str(e)
+            if "CertNameAlreadyExists" in err:
+                # DCDN 证书库已存在同名证书：直接引用该 CertName 重新绑定（不再传内容）
+                log(f"[WARN] {domain} 的 DCDN 证书 {cert_label} 已存在，回退为引用已有证书绑定")
+                try:
+                    req3 = SetDcdnDomainSSLCertificateRequest()
+                    req3.set_accept_format("json")
+                    req3.set_DomainName(domain)
+                    req3.set_CertName(cert_label)
+                    req3.set_SSLProtocol("on")
+                    client.do_action_with_exception(req3)
+                    log(f"已绑定 DCDN {domain} -> 引用已有证书 {cert_label}")
+                except Exception as e2:
+                    log(f"[ERROR] 绑定 DCDN {domain} 失败: {e2}")
+            else:
+                log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
     delete_old_certs(client, f"acme_{safe}_", keep=cert_id)
 
