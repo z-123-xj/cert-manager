@@ -311,7 +311,15 @@ def get_dcdn_cert(client, domain):
         return None
     infos = resp.get("CertInfos") or {}
     items = infos.get("CertInfo", []) if isinstance(infos, dict) else (infos or [])
-    return items[0] if isinstance(items, list) and items else None
+    info = items[0] if isinstance(items, list) and items else None
+    if info is not None:
+        sslpub = info.get("SSLPub") or info.get("Cert") or ""
+        log(f"[DEBUG] {domain} DCDN查询返回: CertName={info.get('CertName')!r}, "
+            f"SSLProtocol={info.get('SSLProtocol')!r}, 字段键={list(info.keys())}, "
+            f"SSLPub前50={sslpub[:50]!r}")
+    else:
+        log(f"[DEBUG] {domain} DCDN查询返回: 无绑定证书信息 (resp键={list(resp.keys())})")
+    return info
 
 
 def _leaf_pem(pem_text):
@@ -356,12 +364,22 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         bound = get_dcdn_cert(client, domain)
         # 必须精确匹配正规证书名（cert_label）才算已正确绑定；若当前绑定的是带时间戳的
         # alt 名（acme_xxx_2026-10-21_1697...），视为未对齐，需重新绑定到正规名。
-        if (not force and bound
-                and bound.get("CertName", "") == cert_label
-                and str(bound.get("SSLProtocol")) == "on"
-                and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
-            log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
-            continue
+        if not force and bound:
+            name_ok = bound.get("CertName", "") == cert_label
+            proto_ok = str(bound.get("SSLProtocol")) == "on"
+            bleaf = _leaf_pem(bound.get("SSLPub") or "")
+            content_ok = bleaf == local_pem
+            if name_ok and proto_ok and content_ok:
+                log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
+                continue
+            why = []
+            if not name_ok:
+                why.append(f"CertName={bound.get('CertName')!r}!=正规名{cert_label!r}")
+            if not proto_ok:
+                why.append(f"SSLProtocol={bound.get('SSLProtocol')!r}")
+            if not content_ok:
+                why.append(f"内容不等[local前40={local_pem[:40]!r}|bound前40={bleaf[:40]!r}]")
+            log(f"[DEBUG] {domain} 判定需重新绑定: {'; '.join(why)}")
         to_bind.append(domain)
     if not to_bind:
         return
