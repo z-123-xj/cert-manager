@@ -354,8 +354,10 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     to_bind = []
     for domain in domains:
         bound = get_dcdn_cert(client, domain)
+        # 必须精确匹配正规证书名（cert_label）才算已正确绑定；若当前绑定的是带时间戳的
+        # alt 名（acme_xxx_2026-10-21_1697...），视为未对齐，需重新绑定到正规名。
         if (not force and bound
-                and bound.get("CertName", "").startswith(f"acme_{safe}_")
+                and bound.get("CertName", "") == cert_label
                 and str(bound.get("SSLProtocol")) == "on"
                 and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
             log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
