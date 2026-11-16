@@ -526,16 +526,18 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
 
     local_pem = _leaf_pem(cert_pem)
     # 0) 逐域名检查云端已绑定的证书是否就是这份（域名级证书名 + 内容一致 + HTTPS 已开）
+    # to_bind 记录 (域名, 原绑定的 CertName)，用于绑定成功后注明替换了哪张旧证书
     to_bind = []
     for domain in domains:
         bound = get_dcdn_cert(client, domain)
+        old_name = (bound.get("CertName", "") if bound else "") or ""
         if (not force and bound
-                and bound.get("CertName", "") == dcdn_label(domain)
+                and old_name == dcdn_label(domain)
                 and str(bound.get("SSLProtocol")) == "on"
                 and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
-            log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
+            log(f"[SKIP] {domain} 已绑定该证书（CertName={old_name}），跳过")
             continue
-        to_bind.append(domain)
+        to_bind.append((domain, old_name or None))
     if not to_bind:
         return
     # 1) 上传到阿里云 SSL 证书服务（同名先查重，存在则复用，避免 NameRepeat 重复创建）
@@ -586,15 +588,18 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
             r.set_SSLPri(key_pem)
         client.do_action_with_exception(r)
 
-    for domain in to_bind:
+    for domain, old_name in to_bind:
         try:
             _bind(domain, dcdn_label(domain))
-            log(f"已绑定 DCDN {domain} -> 证书名 {dcdn_label(domain)}")
+            if old_name:
+                log(f"[BIND] {domain} -> {dcdn_label(domain)}（替换原证书 {old_name}）")
+            else:
+                log(f"[BIND] {domain} -> {dcdn_label(domain)}（原未开启 HTTPS 或查不到绑定记录）")
         except Exception as e:
             if "CertNameAlreadyExists" in str(e):
                 # DCDN 库已存在同名证书，接口不允许覆盖/切换引用，只能控制台手动改绑
-                log(f"[SKIP] DCDN 已存在同名证书 {dcdn_label(domain)}，跳过 {domain}"
-                    f"（若 {domain} 未生效，请在 DCDN 控制台把该域名改绑到 {dcdn_label(domain)} 后重跑）")
+                log(f"[SKIP] {domain} 绑定失败：DCDN 已存在同名证书 {dcdn_label(domain)}"
+                    f"（若未生效，请在 DCDN 控制台把该域名改绑到 {dcdn_label(domain)} 后重跑）")
             else:
                 log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
