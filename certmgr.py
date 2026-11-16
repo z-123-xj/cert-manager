@@ -437,6 +437,11 @@ def issue_certificate(cert, accounts, cf, force):
     cert_file, _ = cert_paths(domains[0])
     exists = os.path.exists(cert_file)
     # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
+    if exists and not force:
+        log(f"[INFO] {name} 本地已存在签发且未过期（到期 {cert_expiry_date(cert_file)}），"
+            f"调用 renew，acme.sh 未到期会自动跳过")
+    else:
+        log(f"[INFO] {name} 开始签发（{'--force 强制重签' if force else '本地无证书'}）")
     ok, _out = run_acme(domains, dns_arg, acme_env, renew=exists and not force)
     if not ok:
         log(f"[ERROR] acme.sh 签发 {name} 失败（dns_account={cert.get('dns_account')}）："
@@ -481,6 +486,20 @@ def cert_not_before_date(cert_pem):
         return time.strftime("%Y-%m-%d")
 
 
+def cert_expiry_date(cert_file):
+    """本地证书的到期日 YYYY-MM-DD（openssl x509 的 enddate），仅用于日志展示；解析失败返回 '?'。"""
+    try:
+        pem = open(cert_file, "r", encoding="utf-8").read()
+        from cryptography import x509
+        c = x509.load_pem_x509_certificate(pem.encode("utf-8"))
+        na = getattr(c, "not_valid_after_utc", None)
+        if na is None:
+            na = c.not_valid_after
+        return na.strftime("%Y-%m-%d")
+    except Exception:
+        return "?"
+
+
 def deploy_cert_group(cert, account, acc_name, domains, force):
     """以 DCDN 云端实际绑定状态为准做幂等：逐域名查当前绑定证书，与本地上传的
     证书内容一致即跳过；否则上传（acme_ 前缀命名）并绑定，最后清理同名前缀的旧证书
@@ -496,16 +515,22 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     client = make_client(account)
     # acme_ 前缀 = 本脚本管理的标识；* 等字符替换掉以保证证书名合法
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", cert_name)
-    cert_label = f"acme_{safe}_{cert_not_before_date(cert_pem)}"
+    nb_date = cert_not_before_date(cert_pem)
+    cert_label = f"acme_{safe}_{nb_date}"
+
+    def dcdn_label(domain):
+        """DCDN 绑定名按部署域名生成：同一张证书部署到多个域名时名字各不相同
+        （如 acme_api.jssupergame.com_2026-11-16 / acme_cdn.jssupergame.com_2026-11-16），
+        避免 DCDN 侧同名证书互抢（CertNameAlreadyExists）；实际内容都是同一份证书文件。"""
+        return f"acme_{re.sub(r'[^A-Za-z0-9._-]', '_', domain)}_{nb_date}"
+
     local_pem = _leaf_pem(cert_pem)
-    # 0) 逐域名检查云端已绑定的证书是否就是这份（acme_ 前缀 + 内容一致 + HTTPS 已开）
+    # 0) 逐域名检查云端已绑定的证书是否就是这份（域名级证书名 + 内容一致 + HTTPS 已开）
     to_bind = []
     for domain in domains:
         bound = get_dcdn_cert(client, domain)
-        # 必须精确匹配正规证书名（cert_label）才算已正确绑定；若当前绑定的是带时间戳的
-        # alt 名（acme_xxx_2026-10-21_1697...），视为未对齐，需重新绑定到正规名。
         if (not force and bound
-                and bound.get("CertName", "") == cert_label
+                and bound.get("CertName", "") == dcdn_label(domain)
                 and str(bound.get("SSLProtocol")) == "on"
                 and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
             log(f"[SKIP] {domain} 已绑定该证书（CertName={bound.get('CertName')}），跳过")
@@ -563,13 +588,13 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
 
     for domain in to_bind:
         try:
-            _bind(domain, cert_label)
-            log(f"已绑定 DCDN {domain} -> 证书名 {cert_label}")
+            _bind(domain, dcdn_label(domain))
+            log(f"已绑定 DCDN {domain} -> 证书名 {dcdn_label(domain)}")
         except Exception as e:
             if "CertNameAlreadyExists" in str(e):
                 # DCDN 库已存在同名证书，接口不允许覆盖/切换引用，只能控制台手动改绑
-                log(f"[SKIP] DCDN 已存在同名证书 {cert_label}，跳过 {domain}"
-                    f"（若 {domain} 未生效，请在 DCDN 控制台把该域名改绑到 {cert_label} 后重跑）")
+                log(f"[SKIP] DCDN 已存在同名证书 {dcdn_label(domain)}，跳过 {domain}"
+                    f"（若 {domain} 未生效，请在 DCDN 控制台把该域名改绑到 {dcdn_label(domain)} 后重跑）")
             else:
                 log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）

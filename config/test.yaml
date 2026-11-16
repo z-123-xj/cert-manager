@@ -1,0 +1,167 @@
+
+certificates:
+  # ---------- 国际站 ----------
+  - name: "ywjhsxl.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["ywjhsxl.com", "*.ywjhsxl.com"]
+    dcdn_domains: ["ywjhsxl.com"]
+
+  - name: "wysjhck.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["wysjhck.com", "*.wysjhck.com"]
+    dcdn_domains: ["wysjhck.com"]
+
+  - name: "wkdlcpw.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["wkdlcpw.com", "*.wkdlcpw.com"]
+    dcdn_domains: ["wkdlcpw.com"]
+
+  - name: "vusdksl.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["vusdksl.com", "*.vusdksl.com"]
+    dcdn_domains: ["vusdksl.com"]
+
+  - name: "vjesuiw.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["vjesuiw.com", "*.vjesuiw.com"]
+    dcdn_domains: ["vjesuiw.com"]
+
+  - name: "pslwejw.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["pslwejw.com", "*.pslwejw.com"]
+    dcdn_domains: ["pslwejw.com"]
+
+  - name: "oskwmsx.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["oskwmsx.com", "*.oskwmsx.com"]
+    dcdn_domains: ["oskwmsx.com"]
+
+  - name: "jsapitwo.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["jsapitwo.com", "*.jsapitwo.com"]
+    dcdn_domains: ["jsapitwo.com"]
+
+  - name: "dhenwxc.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["dhenwxc.com", "*.dhenwxc.com"]
+    dcdn_domains: ["dhenwxc.com"]
+
+  - name: "hsphgames.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: intl1
+    domains: ["hsphgames.com", "*.hsphgames.com"]
+    dcdn_domains:
+      - "cdn.hsphgames.com"          # intl1，用证书级默认账号
+      - domain: "newcdn.hsphgames.com"
+        deploy_account: cn1          # 同一张证书部署到国内站
+
+  # ---------- 国内站 ----------
+  - name: "happyp.vip"
+    dns: aliyun
+    dns_account: cn1
+    deploy_account: cn1
+    domains: ["happyp.vip", "*.happyp.vip"]
+    dcdn_domains: ["cdn.happyp.vip"]
+
+  - name: "jssupergame.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["jssupergame.com", "*.jssupergame.com"]
+    dcdn_domains: ["cdn.jssupergame.com"] 
+
+  - name: "chatsjssupergame.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["chatsjssupergame.com", "*.chatsjssupergame.com"]
+    dcdn_domains: ["chatsjssupergame.com"]
+
+  - name: "ngnbw.com"
+    dns: cloudflare
+    dns_account: cloudflare1
+    deploy_account: cn1
+    domains: ["ngnbw.com", "*.ngnbw.com"]
+    dcdn_domains: ["cdn.ngnbw.com"]
+
+  - name: "cdnfirstpro.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["cdnfirstpro.com", "*.cdnfirstpro.com"]
+    dcdn_domains: ["cdnfirstpro.com"]
+
+  - name: "yeslsbg.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["yeslsbg.com", "*.yeslsbg.com"]
+    dcdn_domains: ["cdn.yeslsbg.com"]
+
+  - name: "protwocdn.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["protwocdn.com", "*.protwocdn.com"]
+    dcdn_domains: ["protwocdn.com"]
+
+  - name: "lkhsreq.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["lkhsreq.com", "*.lkhsreq.com"]
+    dcdn_domains: ["cdn.lkhsreq.com"]
+
+  - name: "bgwjsq.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["bgwjsq.com", "*.bgwjsq.com"]
+    dcdn_domains: ["cdn.bgwjsq.com"]
+
+  - name: "ponegs.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["ponegs.com", "*.ponegs.com"]
+    dcdn_domains: ["cres.ponegs.com"]
+
+  - name: "bgphw.vip"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["bgphw.vip", "*.bgphw.vip"]
+    dcdn_domains: ["cres.bgphw.vip"]
+
+  - name: "octbwp.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["octbwp.com", "*.octbwp.com"]
+    dcdn_domains: ["cres.octbwp.com"]
+
+  - name: "octhsp.com"
+    dns: aliyun
+    dns_account: intl1
+    deploy_account: cn1
+    domains: ["octhsp.com", "*.octhsp.com"]
+    dcdn_domains: ["cres.octhsp.com"]
