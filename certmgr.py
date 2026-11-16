@@ -7,10 +7,13 @@
   2. 绑定到对应 DCDN 加速域名
   3. 清理该证书在阿里云上的旧版本（保留刚上传的）
 
-配置分两部分：
-  - certificates:   要签发的证书。name 为标识（acme 目录名 / CAS 前缀 / dcdn 的 cert 引用）；
-                    domains 列出真正要签发的域名（裸域 / 泛域 / 子域），全部签进同一张证书（SAN）。
-  - dcdn_domains:   具体的 DCDN 加速域名，可显式用 cert 指定用哪张证书（不写则自动按后缀匹配）
+配置以「证书」为单位，每张证书自带 dcdn_domains（要绑定的加速域名），无需 cert 交叉引用：
+  - name:           可选标识（CAS 证书名前缀）；省略时取主域名
+  - dns/dns_account: DNS-01 验证提供方与账号
+  - domains:        可选 SAN 列表；省略时由 dcdn_domains 里的域名去重推导（纯具体域名证书）
+  - deploy_account: 证书级默认部署账号，单个 dcdn 域名可用同名键覆盖
+  - dcdn_domains:   字符串简写或 {domain, deploy_account}
+顶层 dcdn_domains（旧格式）会被归一化回填到对应证书，便于平滑迁移。
 每个证书只签发一次，可被多个 DCDN 域名共用（按「证书 + 部署账号」分组，每组只上传一次）。
 
 支持国内站 / 国际站两套阿里云账号部署；DNS 验证可分别走阿里云 DNS 或 Cloudflare（按证书配置）。
@@ -94,6 +97,147 @@ def load_config(path):
         return expand_env(yaml.safe_load(f))
 
 
+# ----------------------------- 配置归一化 -----------------------------
+def dcdn_items(items, default_account):
+    """把 dcdn_domains 统一成 [{domain, deploy_account}]；支持字符串简写。"""
+    out = []
+    for item in items or []:
+        if isinstance(item, str):
+            out.append({"domain": item.strip(), "deploy_account": default_account})
+        elif isinstance(item, dict):
+            out.append({
+                "domain": str(item.get("domain") or "").strip(),
+                "deploy_account": item.get("deploy_account") or item.get("account") or default_account,
+            })
+        else:
+            out.append({"domain": "", "deploy_account": default_account})
+    return out
+
+
+def normalize_config(cfg):
+    """把新旧配置统一成「每张证书自带 dcdn_domains」的内部结构。
+
+    新格式：certificates[].dcdn_domains（字符串简写或 {domain, deploy_account}）
+    旧格式：顶层 dcdn_domains 按 cert 引用 / 后缀自动匹配回填（仅迁移用）
+    归一化后每张证书一定有 name / domains / dns_account / dcdn_domains。
+    """
+    cfg = dict(cfg or {})
+    accounts = cfg.get("accounts") or {}
+    first_acc = next(iter(accounts), None)
+    cf = cfg.get("cloudflare") or {}
+    if isinstance(cf, dict) and "api_token" in cf:
+        # 旧写法：cloudflare 段直接放单账号凭证 -> 归一化为命名子账号 default
+        single = {k: cf[k] for k in ("api_token", "account_id", "email") if k in cf}
+        cfg["cloudflare"] = {"default": single}
+        cf = cfg["cloudflare"]
+    certs = cfg.get("certificates") or []
+    norm = []
+    for raw in certs if isinstance(certs, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        c = dict(raw)
+        c.setdefault("dns", "aliyun")
+        if not c.get("dns_account"):
+            # cloudflare 从 cloudflare 段取第一个账号；aliyun 从 accounts 取（避免串用）
+            c["dns_account"] = (next(iter(cf), None) if c["dns"] == "cloudflare"
+                                else (c.get("account") or first_acc))
+        default_deploy = c.get("deploy_account") or c.get("account") or first_acc
+        c["dcdn_domains"] = dcdn_items(c.get("dcdn_domains"), default_deploy)
+        norm.append(c)
+
+    # 先补齐 name / domains，供旧格式的自动匹配使用。省略 domains 时由 dcdn 域名
+    # 去重 + 排序推导，保证主域名（即 acme.sh 目录名）在增删域名后尽量稳定。
+    for c in norm:
+        if not c.get("domains"):
+            c["domains"] = sorted({i["domain"] for i in c["dcdn_domains"] if i.get("domain")}) \
+                           or ([c["name"]] if c.get("name") else [])
+            c["_derived_domains"] = True
+        if not c.get("name"):
+            c["name"] = (c["domains"][0] if c["domains"] else "<未命名>").lstrip("*.")
+
+    # 旧格式顶层 dcdn_domains：回填到对应证书（按 cert 引用；无 cert 则后缀自动匹配）
+    for dd in cfg.pop("dcdn_domains", None) or []:
+        if not isinstance(dd, dict):
+            continue
+        domain = str(dd.get("domain") or "").strip()
+        cert_name = dd.get("cert")
+        cert = (next((c for c in norm if c.get("name") == cert_name), None)
+                if cert_name else match_cert(domain, norm))
+        if cert is None:
+            norm.append({"name": cert_name or "<未匹配>", "dns": "aliyun", "domains": [],
+                         "dcdn_domains": [], "_unmatched": domain})
+            continue
+        cert["dcdn_domains"].append({
+            "domain": domain,
+            "deploy_account": dd.get("deploy_account") or dd.get("account")
+                              or cert.get("deploy_account") or first_acc,
+        })
+        if cert.get("_derived_domains"):
+            derived = sorted({i["domain"] for i in cert["dcdn_domains"] if i.get("domain")})
+            cert["domains"] = derived or cert["domains"]
+
+    cfg["certificates"] = norm
+    return cfg
+
+
+# ----------------------------- 配置校验 -----------------------------
+def validate_config(cfg):
+    """加载期校验；返回 (errors, warnings)。主流程遇 error 直接退出，避免静默漏配。"""
+    errors, warnings = [], []
+    accounts = cfg.get("accounts") or {}
+    cf = cfg.get("cloudflare") or {}
+    certs = cfg.get("certificates") or []
+    if not certs:
+        errors.append("certificates 为空，没有要签发的证书")
+    seen_names, seen_domains = set(), {}
+    for c in certs:
+        name = c.get("name") or "<未命名>"
+        tag = f"证书 {name}"
+        if c.get("_unmatched"):
+            errors.append(f"旧格式 dcdn_domains 的 {c['_unmatched']} 找不到对应证书"
+                          f"（补 cert 字段或改成嵌套写法）")
+            continue
+        if name in seen_names:
+            errors.append(f"{tag}: name 重复（name 是 CAS 证书名前缀，必须唯一）")
+        seen_names.add(name)
+        dns, acc_name = c.get("dns"), c.get("dns_account")
+        if dns not in ("aliyun", "cloudflare"):
+            errors.append(f"{tag}: 不支持的 dns={dns}（仅 aliyun / cloudflare）")
+        if dns == "aliyun":
+            acc = accounts.get(acc_name) if acc_name else None
+            if not isinstance(acc, dict):
+                errors.append(f"{tag}: dns_account={acc_name} 不在 accounts 中")
+            elif not (acc.get("access_key") and acc.get("access_secret")):
+                errors.append(f"{tag}: DNS 账号 {acc_name} 缺少 access_key/access_secret")
+        elif dns == "cloudflare":
+            cf_cfg = cf.get(acc_name) if acc_name and isinstance(cf, dict) else None
+            if not (isinstance(cf_cfg, dict) and cf_cfg.get("api_token")):
+                errors.append(f"{tag}: dns_account={acc_name} 在 cloudflare 中不存在或缺少 api_token")
+        domains = c.get("domains") or []
+        if not domains:
+            errors.append(f"{tag}: domains 为空（显式写 domains，或至少配一个 dcdn_domains 域名）")
+        for d in domains:
+            if (not isinstance(d, str) or not d or any(ch in d for ch in " /")
+                    or d.startswith(".") or "." not in d):
+                errors.append(f"{tag}: 非法域名 {d!r}")
+        for dd in c["dcdn_domains"]:
+            domain, deploy_acc = dd.get("domain"), dd.get("deploy_account")
+            if not domain:
+                errors.append(f"{tag}: dcdn_domains 存在空域名或非法项")
+                continue
+            if not deploy_acc or deploy_acc not in accounts:
+                errors.append(f"{tag}: {domain} 的 deploy_account={deploy_acc} 不在 accounts 中")
+            if domains and not cert_covers(c, domain):
+                errors.append(f"{tag}: DCDN 域名 {domain} 不被证书 SAN 覆盖（domains={domains}）")
+            if domain in seen_domains and seen_domains[domain] != name:
+                errors.append(f"域名 {domain} 同时声明在证书 {seen_domains[domain]} 和 {name}，会重复绑定")
+            seen_domains[domain] = name
+        if c.get("_derived_domains") and len(domains) > 1:
+            warnings.append(f"{tag}: domains 由 dcdn_domains 推导为 {domains}；"
+                            f"如需泛域/裸域/额外 SAN，请显式写 domains")
+    return errors, warnings
+
+
 # ----------------------------- 证书路径 -----------------------------
 def cert_paths(domain):
     """返回 (fullchain.cer, <domain>.key)。acme.sh 用 ECC 时目录名为 <domain>_ecc，
@@ -109,7 +253,7 @@ def cert_paths(domain):
 
 # ----------------------------- 证书域名解析 -----------------------------
 def cert_domains(cert):
-    """该证书真正要签发的域名列表；不写 domains 时退化为 [name]（向后兼容）。"""
+    """证书 SAN 列表；normalize_config 后恒有 domains（省略时已由 dcdn 域名推导）。"""
     return list(cert.get("domains") or [cert["name"]])
 
 
@@ -211,21 +355,25 @@ def find_cert_id_by_name(client, name):
     return None
 
 
-# ----------------------------- 证书覆盖匹配 -----------------------------
+# ----------------------------- 证书覆盖判断 -----------------------------
 def cert_covers(cert, domain):
-    """domain 是否被该证书覆盖（domains 列表中的任一项）。"""
+    """domain 是否被该证书的 SAN 覆盖。泛域 *.suf 只覆盖一级子域，
+    既不覆盖裸域 suf，也不覆盖多级子域（如 a.b.suf）。"""
     for n in cert_domains(cert):
         if n == domain:
             return True
         if n.startswith("*."):
-            suf = n[2:]
-            if domain == suf or domain.endswith("." + suf):
-                return True
+            tail = n[1:]  # ".suf"
+            if domain.endswith(tail):
+                label = domain[:-len(tail)]
+                if label and "." not in label:
+                    return True
     return False
 
 
 def match_cert(domain, certs):
-    """为 DCDN 域名选证书：精确匹配优先，否则选最长泛域名后缀。"""
+    """为 DCDN 域名选证书：精确匹配优先，否则选最长泛域名后缀。
+    仅用于旧格式（顶层 dcdn_domains 未写 cert）的迁移，新格式不需要。"""
     exact = None
     best = None
     best_len = -1
@@ -236,7 +384,7 @@ def match_cert(domain, certs):
             exact = c
         sufs = [n[2:] for n in cert_domains(c) if n.startswith("*.")]
         if sufs:
-            suf = max(sufs)
+            suf = max(sufs, key=len)
             if len(suf) > best_len:
                 best = c
                 best_len = len(suf)
@@ -248,7 +396,7 @@ def issue_certificate(cert, accounts, cf, force):
     name = cert["name"]
     dns = cert.get("dns", "aliyun")
     if dns == "aliyun":
-        acc_name = cert.get("dns_account") or cert.get("account", "cn")
+        acc_name = cert.get("dns_account")
         acc = accounts.get(acc_name)
         if not acc:
             log(f"[ERROR] 证书 {name} dns=aliyun 但 DNS 账号 {acc_name} 不存在，跳过")
@@ -291,7 +439,7 @@ def issue_certificate(cert, accounts, cf, force):
     # 首次 issue；之后 renew（acme.sh 自己判断是否需要真正续期，未到期会跳过）
     ok, _out = run_acme(domains, dns_arg, acme_env, renew=exists and not force)
     if not ok:
-        log(f"[ERROR] acme.sh 签发 {name} 失败（dns_account={acc_name}）："
+        log(f"[ERROR] acme.sh 签发 {name} 失败（dns_account={cert.get('dns_account')}）："
             f"请检查该 DNS 账号凭证是否正确、是否拥有对应域名的解析权限")
         return
 
@@ -430,46 +578,30 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
 
 # ----------------------------- 主流程 -----------------------------
 def process(cfg, force=False):
-    accounts = cfg.get("accounts", {})
-    cf = cfg.get("cloudflare", {})
-    certs = cfg.get("certificates", [])
-    dcdn_domains = cfg.get("dcdn_domains", [])
+    accounts = cfg.get("accounts") or {}
+    cf = cfg.get("cloudflare") or {}
+    certs = cfg.get("certificates") or []
 
-    # 1) 签发所有 certificates（每个证书只签一次）
+    # 1) 签发所有证书（每张只签一次）
     for c in certs:
         issue_certificate(c, accounts, cf, force)
 
-    # 2) 为每个 DCDN 域名匹配证书，并按 (证书名, 部署账号) 分组
-    #    优先用 dcdn 项里显式指定的 cert（无歧义、可控）；未指定时回退到自动后缀匹配
+    # 2) 证书自带 dcdn_domains，按 (证书, 部署账号) 分组；每组只上传一次
     groups = {}
-    for dd in dcdn_domains:
-        domain = dd["domain"]
-        cert = None
-        cert_name = dd.get("cert")
-        if cert_name:
-            cert = next((c for c in certs if c["name"] == cert_name), None)
-            if not cert:
-                log(f"[ERROR] DCDN 域名 {domain} 指定的证书 {cert_name} 不存在，跳过")
+    for c in certs:
+        for dd in c.get("dcdn_domains") or []:
+            domain, acc_name = dd.get("domain"), dd.get("deploy_account")
+            account = accounts.get(acc_name)
+            if not (domain and account):
                 continue
-            if not cert_covers(cert, domain):
-                log(f"[WARN] DCDN 域名 {domain} 指定的证书 {cert_name} 不含该域名，绑定可能失败")
-        else:
-            cert = match_cert(domain, certs)
-            if not cert:
-                log(f"[ERROR] DCDN 域名 {domain} 找不到匹配的证书，跳过")
-                continue
-        acc_name = dd.get("deploy_account") or dd.get("account", "cn")
-        account = accounts.get(acc_name)
-        if not account:
-            log(f"[ERROR] DCDN 域名 {domain} 部署账号 {acc_name} 不存在，跳过")
-            continue
-        key = (cert["name"], acc_name)
-        groups.setdefault(key, {"cert": cert, "account": account, "acc_name": acc_name, "domains": []})
-        if domain not in groups[key]["domains"]:
-            groups[key]["domains"].append(domain)
+            key = (c["name"], acc_name)
+            g = groups.setdefault(key, {"cert": c, "account": account,
+                                        "acc_name": acc_name, "domains": []})
+            if domain not in g["domains"]:
+                g["domains"].append(domain)
 
     # 3) 每组上传一次 + 绑定组内所有域名 + 删旧
-    for key, g in groups.items():
+    for g in groups.values():
         deploy_cert_group(g["cert"], g["account"], g["acc_name"], g["domains"], force)
 
 
@@ -477,11 +609,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config/certs.yaml")
     ap.add_argument("--force", action="store_true", help="强制重新签发并重新上传/绑定部署")
+    ap.add_argument("--check", action="store_true", help="只校验并打印归一化后的配置，不签发/部署")
     args = ap.parse_args()
     if not os.path.exists(args.config):
         log(f"[ERROR] 配置文件不存在: {args.config}")
         sys.exit(1)
-    cfg = load_config(args.config)
+    cfg = normalize_config(load_config(args.config))
+    errors, warnings = validate_config(cfg)
+    for w in warnings:
+        log(f"[WARN] {w}")
+    for e in errors:
+        log(f"[ERROR] 配置校验失败: {e}")
+    if errors:
+        sys.exit(1)
+    if args.check:
+        for c in cfg["certificates"]:
+            accs = sorted({d["deploy_account"] for d in c["dcdn_domains"]})
+            log(f"[OK] 证书 {c['name']}: 主域名={c['domains'][0]}, SAN={c['domains']}, "
+                f"DCDN {len(c['dcdn_domains'])} 个, 部署账号={accs}")
+        log(f"[OK] 配置校验通过：{len(cfg['certificates'])} 张证书")
+        return
     check_acme()
     process(cfg, force=args.force)
 

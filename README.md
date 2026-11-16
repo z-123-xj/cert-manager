@@ -51,18 +51,31 @@ cp config/certs.example.yaml config/certs.yaml
 
 配置里可用 `${ENV_VAR}` 注入 AK（见下方运行步骤），也可直接写明文。
 
-配置分两部分（**证书与加速域名解耦**）：
+配置以**证书为单位**：每张证书自带 `dcdn_domains`，不再有顶层 `dcdn_domains`，也不需要 `cert` 交叉引用（引用写错、多张证书自动匹配歧义的问题随之消失）。
 
-- **`certificates`**：要签发的证书。`name` 是该证书的**标识**（也是 acme.sh 目录名、CAS 证书前缀、`dcdn_domains` 里 `cert` 引用的名字），不一定要进证书；
-  `domains` 是**真正要签发的完整域名列表**（裸域 / 泛域 / 子域），每个都会作为 `-d` 拆开、签进同一张证书（SAN）。不写 `domains` 时退化为只签 `name` 本身。
-  每个证书有两条独立配置：
-  - `dns`（验证方）：`aliyun` 用 `accounts` 里对应 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下某个命名子账号的 API Token；
-  - `dns_account`：验证用的账号（`aliyun` → `accounts` 的 key；`cloudflare` → `cloudflare` 的命名子账号）。
-- **`dcdn_domains`**：具体的 DCDN 加速域名。每项用 `deploy_account` 指定证书上传并绑定到哪个阿里云账号（`accounts` 的 key）下的 DCDN；
-  可选 `cert` 字段**显式指定用哪张证书**（填 `certificates` 里某项的 `name`）。在存在多级子域（如 `app.www.example.com`）或多张证书时，
-  显式指定能避免自动匹配的歧义；不写 `cert` 则回退为「按后缀自动匹配能覆盖它的证书」（精确优先，否则最长泛域名后缀）。
+```yaml
+certificates:
+  - name: "example.org"            # 可选：证书标识 = CAS 证书名前缀；省略时取主域名
+    dns: cloudflare                # 可选，默认 aliyun（aliyun / cloudflare）
+    dns_account: cloudflare1       # DNS-01 验证账号
+    deploy_account: intl1          # 可选：证书级默认部署账号
+    # domains: ["example.org", "*.example.org"]   # 可选：需要泛域/裸域/额外 SAN 时写
+    dcdn_domains:
+      - "www.example.org"          # 字符串简写：用证书级 deploy_account
+      - "api.example.org"
+      - domain: "cn.example.org"   # 需要换账号时才展开成对象
+        deploy_account: cn1
+```
 
-两者互不影响——DNS 在 Cloudflare、DCDN 在阿里云的域名同样支持。每个证书只签发一次，可被多个 DCDN 域名共用（按「证书 + 部署账号」分组，每组只上传一次）。
+- **`domains`（可选）**：真正签进证书的 SAN 列表（裸域 / 泛域 / 子域），每项拆成 `-d`。**省略时由 `dcdn_domains` 里的域名去重推导**（排序后首项为主域名，也就是 acme.sh 目录名），适合「只签具体域名」的简单场景；需要泛域 `*.example.org`、裸域、或只签不部署的域名时必须显式写。注意推导模式下每新增一个域名都会改变 SAN → 触发重签，且主域名可能变化，所以**域名较多或需要泛域时建议显式写 `domains`**。
+- **`dcdn_domains`**：要绑定的加速域名。字符串简写用证书级 `deploy_account`；写成 `{domain, deploy_account}` 可覆盖账号，因此一张证书可同时部署到国内站和国际站。
+- **`dns` / `dns_account`**：`aliyun` 用 `accounts` 里的 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下命名子账号的 API Token。`dns_account` 省略时取对应账号段的第一个 key（`aliyun` → `accounts`，`cloudflare` → `cloudflare`）；`cloudflare` 单账号旧写法（凭证直接写在 `cloudflare:` 段下）也会自动归一化。
+
+DNS 在 Cloudflare、DCDN 在阿里云互不影响的用法仍然支持。每个证书只签发一次，按「证书 + 部署账号」分组，每组只上传一次。
+
+启动时会在**加载期校验**：账号引用存在、证书 SAN 覆盖 DCDN 域名、`name` 唯一、域名不跨证书重复；有错直接退出，不会静默跳过。用 `python3 certmgr.py --config config/certs.yaml --check` 可只校验并打印归一化后的证书与分组，不签发、不部署、也不要求装 acme.sh。
+
+**旧配置迁移**：顶层 `dcdn_domains` 仍会被自动识别，按 `cert` 引用（无 `cert` 则按后缀匹配）回填到对应证书，新旧格式可混用一段时间。迁移时把顶层各项按 `cert` 分组移进对应证书的 `dcdn_domains`，删掉 `cert` 字段，同账号的项改成字符串简写，并在证书级写一次 `deploy_account`。完整对照见 `config/certs.example.yaml` 末尾。
 
 **多账号**：阿里云可在 `accounts` 下加任意多个 key（如 `cn1` / `intl1` / `cn2` / `intl2`）；
 Cloudflare 在 `cloudflare` 下用命名子账号（如 `cloudflare1` / `cloudflare2`），`dns_account` 指定具体哪一个。
@@ -83,13 +96,16 @@ cp config/certs.example.yaml config/certs.yaml   # 填域名与账号
 #       不提交该文件；cron 也能正常读到，无需任何环境变量）。选 A 则跳过下面的 export。
 #    B. 用环境变量注入：certs.yaml 里写 "${CN1_AK}" 这类引用，运行时需提供对应变量。
 #       ⚠️ 注意：~/.bashrc 里的 export 对 crontab 定时任务【无效】（cron 不加载 bashrc）！
-#       若选 B，请改用下方第 5 步 crontab 行内联变量的方式，不要依赖 bashrc。
+#       若选 B，请改用下方第 6 步 crontab 行内联变量的方式，不要依赖 bashrc。
 export LE_WORKING_DIR=$HOME/.acme.sh             # acme.sh 默认目录（本机需要，容器默认 /acme.sh）
 
-# 4) 立即执行一次
+# 4) 先校验配置（只打印归一化后的证书/分组，不签发、不部署）
+python3 certmgr.py --config config/certs.yaml --check
+
+# 5) 立即执行一次
 python3 certmgr.py --config config/certs.yaml
 
-# 5) 注册系统 crontab（每日续期+部署，单一驱动）
+# 6) 注册系统 crontab（每日续期+部署，单一驱动）
 # 若服务器此前已有 acme.sh 自动注册的 --cron 任务，先删掉避免重复：
 crontab -l | grep -v 'acme.sh --cron' | crontab -
 crontab -e
@@ -109,6 +125,8 @@ crontab -e
 ## 注意事项
 
 - `~/.acme.sh` 是 acme.sh 证书与 Let's Encrypt 账号目录，**不要删除**，否则已签发证书与账号会丢失，频繁重签可能触发 LE 速率限制。
+- `name` 决定 CAS 证书名前缀（`acme_<name>_`）。改 `name` 会让旧前缀证书不再被自动清理（脚本只清理当前前缀），已有证书如非必要不要改名。
+- 泛域 `*.example.org` 只覆盖一级子域（如 `www.example.org`），**不含**裸域 `example.org`，也不含 `a.b.example.org`；这类域名必须显式列进 `domains`，否则加载期校验会报错。
 - 国际站账号的 `region` / 如需指定 `endpoint` 在配置中填写（默认按 region 自动选 endpoint）。
 - 阿里云 CAS / DCDN SDK 的接口参数若随版本变化，以阿里云官方文档为准微调 `certmgr.py` 中对应请求即可。
 

@@ -3,14 +3,22 @@
 #
 # 账号命名约定：阿里云按「站点+序号」cn1/intl1/cn2/intl2...；Cloudflare 按 cloudflare1/cloudflare2...
 #
-# 配置分两部分：
-#   certificates:   要签发的证书。name 是标识（acme 目录名 / CAS 证书前缀 / dcdn 里 cert 引用名）；
-#                   真正要签的域名都写在 domains 里（裸域 / 泛域 / 子域），每个拆成 -d 签进同一张证书（SAN）。
-#   dcdn_domains:   具体的 DCDN 加速域名，可用 cert 显式指定证书（不写则自动按后缀匹配）
+# 配置以「证书」为单位：每张证书自带 dcdn_domains（要绑定的 DCDN 加速域名）。
+# 不再需要顶层 dcdn_domains，也不需要 cert 交叉引用。
+# certificates[] 字段速查：
+#   name            可选，证书标识 = CAS 证书名前缀；省略时取主域名
+#   dns             可选，默认 aliyun；可选 aliyun / cloudflare
+#   dns_account     DNS-01 验证账号（aliyun -> accounts 的 key；cloudflare -> cloudflare 的 key）
+#   domains         可选，真正签进证书的 SAN 列表；省略时由 dcdn_domains 的域名去重推导
+#   deploy_account  可选，证书级默认部署账号；accounts 的 key
+#   dcdn_domains    要绑定的加速域名：字符串简写，或 {domain, deploy_account} 覆盖账号
+#
+# 改完先跑：python3 certmgr.py --config config/certs.example.yaml --check
+# 旧格式（顶层 dcdn_domains + cert 引用）仍可自动识别，见文件末尾迁移说明。
 
 accounts:
   # 阿里云账号：既可用于「DNS 验证」（dns=aliyun），也可用于「部署」（上传证书+绑定 DCDN）
-  # 可任意增减 key（cn1 / intl1 / cn2 / intl2 ...），证书用 dns_account、域名用 deploy_account 引用
+  # 可任意增减 key（cn1 / intl1 / cn2 / intl2 ...）
   cn1:
     access_key: "${CN1_AK}"
     access_secret: "${CN1_SK}"
@@ -30,54 +38,67 @@ accounts:
 # Cloudflare DNS 验证凭证（仅当某证书 dns=cloudflare 时需要）
 # 支持多账号：每个命名子账号一组 api_token；证书用 dns_account 指定用哪一个
 cloudflare:
-  cloudflare1:                      # 第一个 Cloudflare 账号
+  cloudflare1:
     api_token: "${CF_TOKEN_1}"      # -> acme.sh 的 CF_Token
-    account_id: "${CF_ACCOUNT_ID_1}"  # 可选，多账号/部分区域需要 -> CF_Account_ID
+    account_id: "${CF_ACCOUNT_ID_1}"  # 可选 -> CF_Account_ID
     # email: "${CF_EMAIL}"          # 仅旧版 Global Key 方式需要 -> CF_Email
-
-  cloudflare2:                      # 第二个 Cloudflare 账号（按需增减）
+  cloudflare2:
     api_token: "${CF_TOKEN_2}"
     account_id: "${CF_ACCOUNT_ID_2}"
 
-# 要签发的证书（每个只签发一次，可被多个 DCDN 域名共用）
-# name 是标识（不一定要进证书）；真正要签的域名都显式写在 domains 列表里。
 certificates:
-  # 例1：国内站一张证书，覆盖裸域 example.com + 泛域 *.example.com + 三级子域 app.example.com
-  #      （三个域名都列在 domains 里，acme.sh 一次签成同一张 SAN 证书）
+  # 例1：显式 domains —— 需要泛域 / 裸域 / 额外 SAN 时必须写。
+  #      三个域名一次签成同一张 SAN 证书；xxx.example.com 只签不部署到 DCDN。
   - name: "example.com"
     dns: aliyun
     dns_account: cn1
+    deploy_account: cn1             # 下面所有域名的默认部署账号
     domains:
       - "example.com"
       - "*.example.com"
       - "xxx.example.com"
+    dcdn_domains:
+      - "www.example.com"           # 字符串简写：使用证书级 deploy_account
+      - "api.example.com"
+      - "app.example.com"
+      - "example.com"
+      - domain: "intl.example.com"  # 需要换账号时才展开成对象
+        deploy_account: intl1
 
-  # 例2：Cloudflare 验证、签一张泛域名证书（部署到国际站）
+  # 例2：省略 domains —— 由 dcdn_domains 的域名去重推导 SAN（纯具体域名证书）。
+  #      等价于 domains: ["cn.example.org", "www.example.org"]，推导后按字典序排序，
+  #      首项即主域名（acme.sh 目录名）。想固定主域名或加泛域，请显式写 domains。
   - name: "example.org"
     dns: cloudflare
     dns_account: cloudflare1
-    domains:
-      - "*.example.org"
-      - "example.org"
-
-# 具体的 DCDN 加速域名
-#   deploy_account：证书上传并绑定到哪个阿里云账号
-#   cert（可选）：显式指定用 certificates 里哪张证书（填其 name）。
-#        多级子域（如 app.www.example.com）或存在多张证书时，显式指定可避免自动匹配歧义；
-#        不写 cert 则回退为「按后缀自动匹配能覆盖它的证书」。
-dcdn_domains:
-  - domain: "www.example.com"
-    deploy_account: cn1
-    cert: "example.com"
-  - domain: "api.example.com"
-    deploy_account: cn1
-    cert: "example.com"
-  - domain: "app.example.com"
-    deploy_account: cn1
-    cert: "example.com"
-  - domain: "example.com"
-    deploy_account: cn1
-    cert: "example.com"
-  - domain: "www.example.org"
     deploy_account: intl1
-    cert: "example.org"
+    dcdn_domains:
+      - "www.example.org"
+      - domain: "cn.example.org"
+        deploy_account: cn1
+
+# ---------------------------------------------------------------------------
+# 旧格式迁移对照（改完即可删除本段）
+#   旧：certificates[].domains + 顶层 dcdn_domains[]，每项用 cert 指向证书 name
+#   新：把顶层 dcdn_domains 按 cert 分组，整段移进对应证书的 dcdn_domains；
+#       删掉 cert 字段，同一账号的项改成字符串简写，证书级写一次 deploy_account。
+#   例（旧）：
+#     certificates:
+#       - name: "example.org"
+#         dns: cloudflare
+#         dns_account: cloudflare1
+#         domains: ["*.example.org", "example.org"]
+#     dcdn_domains:
+#       - domain: "www.example.org"
+#         deploy_account: intl1
+#         cert: "example.org"
+#   等价于（新）：
+#     certificates:
+#       - name: "example.org"
+#         dns: cloudflare
+#         dns_account: cloudflare1
+#         deploy_account: intl1
+#         domains: ["*.example.org", "example.org"]
+#         dcdn_domains: ["www.example.org"]
+#   顶层写法脚本仍会自动回填，两种格式可混用一段时间。
+# ---------------------------------------------------------------------------
