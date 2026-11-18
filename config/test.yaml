@@ -1,3 +1,21 @@
+accounts:
+  cn1:
+    access_key: "${CN1_AK}"
+    access_secret: "${CN1_SK}"
+    region: "cn-hangzhou"          # 国内站固定
+
+  intl1:
+    access_key: "${INTL1_AK}"
+    access_secret: "${INTL1_SK}"
+    region: "ap-southeast-1"       # 国际站
+
+cloudflare:
+  cloudflare1:
+    api_token: "${CF_TOKEN_1}"
+    account_id: "${CF_ACCOUNT_ID_1}"
+
+# WAF 实例 ID 已移到 config/.env，按账号配 CN1_WAF_INSTANCE_ID / INTL1_WAF_INSTANCE_ID
+# （多个实例时用 --list-waf-instances 查看对应账号的实例 ID 后填写）
 
 certificates:
   # ---------- 国际站 ----------
@@ -165,3 +183,25 @@ certificates:
     deploy_account: cn1
     domains: ["octhsp.com", "*.octhsp.com"]
     dcdn_domains: ["cres.octhsp.com"]
+
+
+  # ---------- WAF ----------
+  # 111wuw.bet 已在 WAF 接入：仅替换证书为 acme_waf_ 前缀那份，现有回源不动
+  - name: "111wuw.bet"
+    dns: cloudflare
+    dns_account: cloudflare1
+    deploy_account: cn1
+    domains: ["111wuw.bet", "*.111wuw.bet"]
+    waf_origin: "47.84.116.133"
+    waf_domains:
+      - "111wuw.bet"
+
+  # 222wuw.bet 未接入：会用 waf_origin 自动 CreateDomain（HTTP 80 起步）再开 443 绑证书
+  - name: "222wuw.bet"
+    dns: cloudflare
+    dns_account: cloudflare1
+    deploy_account: cn1
+    domains: ["222wuw.bet", "*.222wuw.bet"]
+    waf_origin: "47.84.116.133"
+    waf_domains:
+      - "222wuw.bet"

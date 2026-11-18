@@ -1,39 +1,28 @@
 # cert-manager 配置示例
-# 复制为 certs.yaml 后填写；也支持用环境变量 ${VAR} 注入 AK。
+# 复制为 certs.yaml 后填写。
+#
+# 账号 AK/SK 已独立到 config/.env（复制 .env.example 填写），本文件不再写 access_key/secret。
+#   .env 里 CN1_AK / CN1_SK -> 账号 cn1；可选 CN1_REGION / CN1_ENDPOINT；
+#   WAF 用 WAF_INSTANCE_ID（必填）/ WAF_REGION（默认 cn-hangzhou）。
+#   服务器 crontab 里内联的环境变量优先级高于 .env。
 #
 # 账号命名约定：阿里云按「站点+序号」cn1/intl1/cn2/intl2...；Cloudflare 按 cloudflare1/cloudflare2...
 #
-# 配置以「证书」为单位：每张证书自带 dcdn_domains（要绑定的 DCDN 加速域名）。
+# 配置以「证书」为单位：每张证书自带 dcdn_domains（DCDN 加速域名）和/或 waf_domains（WAF 防护域名）。
 # 不再需要顶层 dcdn_domains，也不需要 cert 交叉引用。
 # certificates[] 字段速查：
 #   name            可选，证书标识 = CAS 证书名前缀；省略时取主域名
 #   dns             可选，默认 aliyun；可选 aliyun / cloudflare
-#   dns_account     DNS-01 验证账号（aliyun -> accounts 的 key；cloudflare -> cloudflare 的 key）
-#   domains         可选，真正签进证书的 SAN 列表；省略时由 dcdn_domains 的域名去重推导
-#   deploy_account  可选，证书级默认部署账号；accounts 的 key
+#   dns_account     DNS-01 验证账号（aliyun -> .env 账号 key；cloudflare -> cloudflare 的 key）
+#   domains         可选，真正签进证书的 SAN 列表；省略时由 dcdn_domains + waf_domains 去重推导
+#   deploy_account  可选，证书级默认部署账号；账号 key
 #   dcdn_domains    要绑定的加速域名：字符串简写，或 {domain, deploy_account} 覆盖账号
+#   waf_origin      WAF 证书级源站（IP 或域名），供所有 waf_domains 共用
+#   waf_domains     WAF 防护域名：字符串列表即可；未接入的域名用 waf_origin 自动接入（HTTP 80 起步）
+#                   （个别域名源站/账号不同时才展开 {domain, origin, deploy_account} 对象）
 #
 # 改完先跑：python3 certmgr.py --config config/certs.example.yaml --check
 # 旧格式（顶层 dcdn_domains + cert 引用）仍可自动识别，见文件末尾迁移说明。
-
-accounts:
-  # 阿里云账号：既可用于「DNS 验证」（dns=aliyun），也可用于「部署」（上传证书+绑定 DCDN）
-  # 可任意增减 key（cn1 / intl1 / cn2 / intl2 ...）
-  cn1:
-    access_key: "${CN1_AK}"
-    access_secret: "${CN1_SK}"
-    region: "cn-hangzhou"          # 国内站固定
-
-  intl1:
-    access_key: "${INTL1_AK}"
-    access_secret: "${INTL1_SK}"
-    region: "ap-southeast-1"       # 国际站
-    # endpoint: "ap-southeast-1.aliyuncs.com"
-
-  cn2:                              # 示例：第三个阿里云账号
-    access_key: "${CN2_AK}"
-    access_secret: "${CN2_SK}"
-    region: "cn-hangzhou"
 
 # Cloudflare DNS 验证凭证（仅当某证书 dns=cloudflare 时需要）
 # 支持多账号：每个命名子账号一组 api_token；证书用 dns_account 指定用哪一个
@@ -76,6 +65,23 @@ certificates:
       - "www.example.org"
       - domain: "cn.example.org"
         deploy_account: cn1
+
+  # 例3：WAF 3.0 防护域名。证书换名上传（acme_waf_ 前缀），不与 DCDN 同名冲突。
+  #      统一用证书级 waf_origin（源站）+ waf_domains（域名字符串列表）即可，无需逐域名写 origin。
+  #      已接入的域名只校验证书并按需切引用；确实未接入的用 waf_origin 自动 CreateDomain。
+  - name: "waf.example.net"
+    dns: aliyun
+    dns_account: cn1
+    deploy_account: cn1
+    domains: ["waf.example.net", "*.example.net"]   # waf 域名需在 SAN 内
+    waf_origin: ["1.2.3.4", "1.2.3.5"]              # 源站 IP 或回源域名，供所有 waf 域名共用
+    waf_domains:
+      - "waf.example.net"            # 已接入 WAF：仅替换证书
+      - "new.example.net"            # 未接入：用 waf_origin 自动接入再开 443 绑证书
+    # 仅当某域名源站/账号与证书级不同时，才展开成对象（本例不需要）：
+    #   - domain: "special.example.net"
+    #     origin: ["5.6.7.8"]
+    #     deploy_account: intl1
 
 # ---------------------------------------------------------------------------
 # 旧格式迁移对照（改完即可删除本段）
