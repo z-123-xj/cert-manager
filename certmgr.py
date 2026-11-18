@@ -1184,10 +1184,12 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
     backends = waf_backends(redirect_in) or item.get("origin") or []
     new_redirect["Backends"] = backends
     new_redirect.setdefault("Loadbalance", "iphash")
-    waf_api_retry_processing(client, "ModifyDomain", {
+    params = {
         "InstanceId": iid, "Domain": domain, "AccessType": "share",
         "Listen": new_listen, "Redirect": new_redirect,
-    }, region)
+    }
+    log(f"[DEBUG] WAF {domain} ModifyDomain 请求 Listen={new_listen} Redirect={new_redirect}")
+    waf_api_retry_processing(client, "ModifyDomain", params, region)
     return backends
 
 
@@ -1201,6 +1203,9 @@ def waf_find_cert_in_library(client, region, iid, cert_number):
         certs = resp.get("Certs") or []
         for c in certs:
             if waf_cert_number(c.get("CertIdentifier")) == str(cert_number):
+                log(f"[DEBUG] WAF 证书库命中 {cert_number}: Domain={c.get('Domain')} "
+                    f"CertName={c.get('CertName')} IsChainCompleted={c.get('IsChainCompleted')} "
+                    f"CertIdentifier={c.get('CertIdentifier')}")
                 return c.get("CertIdentifier")
         total = int(resp.get("TotalCount") or 0)
         if len(certs) < 100 or page * 100 >= total:
