@@ -966,22 +966,47 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
     return backends
 
 
+def waf_find_cert_in_library(client, region, iid, cert_number):
+    """翻页查 WAF 证书库，按数字证书 ID 匹配并返回真实 CertIdentifier，找不到返回 None。
+    DescribeCerts 的 PageSize 默认是 10，证书多时必须翻页，否则新证书会被漏掉。"""
+    page = 1
+    while True:
+        resp = waf_api(client, "DescribeCerts",
+                       {"InstanceId": iid, "PageNumber": page, "PageSize": 100}, region)
+        certs = resp.get("Certs") or []
+        for c in certs:
+            if waf_cert_number(c.get("CertIdentifier")) == str(cert_number):
+                return c.get("CertIdentifier")
+        total = int(resp.get("TotalCount") or 0)
+        if len(certs) < 100 or page * 100 >= total:
+            return None
+        page += 1
+
+
 def waf_wait_cert_visible(client, region, iid, cert_number, tries=6, interval=10):
-    """等上传到 CAS 的证书同步进 WAF 可选证书库；可见返回 CertIdentifier，超时返回拼接兜底值。"""
-    fallback = f"{cert_number}-{region}"
+    """等上传到 CAS 的证书同步进 WAF 证书库；找到返回真实 CertIdentifier。
+    超时降级返回纯数字证书 ID（ModifyDomain.CertId 文档要求纯 ID；不拼 -<region>，WAF 不认）。"""
     for i in range(tries):
         try:
-            resp = waf_api(client, "DescribeCerts", {"InstanceId": iid}, region)
-            for c in resp.get("Certs") or []:
-                if waf_cert_number(c.get("CertIdentifier")) == str(cert_number):
-                    return c.get("CertIdentifier") or fallback
+            identifier = waf_find_cert_in_library(client, region, iid, cert_number)
+            if identifier:
+                return identifier
         except Exception as e:
             log(f"[WARN] 查询 WAF 可选证书失败: {e}")
         if i < tries - 1:
             time.sleep(interval)
-    log(f"[WARN] 证书 {cert_number} 在 {tries * interval}s 内未同步到 WAF 证书库，"
-        f"仍按 {fallback} 尝试绑定（若失败请稍后重跑）")
-    return fallback
+    # 超时：打印 WAF 证书库实际内容，便于区分「分页漏查 / 未同步 / 站点不匹配」
+    try:
+        resp = waf_api(client, "DescribeCerts",
+                       {"InstanceId": iid, "PageNumber": 1, "PageSize": 5}, region)
+        samples = [c.get("CertIdentifier") for c in (resp.get("Certs") or [])[:5]]
+        log(f"[DEBUG] WAF 证书库 region={region} TotalCount={resp.get('TotalCount')} 示例={samples}")
+    except Exception:
+        pass
+    log(f"[WARN] 证书 {cert_number} 在 {tries * interval}s 内未出现在 WAF 证书库，"
+        f"改用纯证书 ID {cert_number} 尝试绑定；若仍报 CertNotExist，"
+        f"说明该证书不在此 WAF 实例所属站点的证书库，需在对应站点的证书服务上传")
+    return str(cert_number)
 
 
 def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_id=None, region=None):
