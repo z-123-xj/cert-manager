@@ -9,15 +9,16 @@
 
 配置以「证书」为单位，每张证书自带 dcdn_domains / waf_domains（可选），无需 cert 交叉引用：
   - name:           可选标识（CAS 证书名前缀）；省略时取主域名
-  - dns/dns_account: DNS-01 验证提供方与账号
+  - dns/dns_account: DNS-01 验证平台名 / 该平台下账号名
   - domains:        可选 SAN 列表；省略时由 dcdn_domains + waf_domains 去重推导
-  - deploy_account: 证书级默认部署账号，单个域名可用同名键覆盖
-  - dcdn_domains:   字符串简写或 {domain, deploy_account}
-  - waf_domains:    字符串简写或 {domain, deploy_account, origin}（origin=源站，兼容旧 backends）
+  - deploy/deploy_account: 部署平台（aliyun_cn/aliyun_intl）+ 该平台下账号名，二者配对确定账号
+  - dcdn_domains:   字符串简写或 {domain, deploy, deploy_account}
+  - waf_domains:    字符串简写或 {domain, deploy, deploy_account, waf_id, origin}（origin=源站，兼容旧 backends）
   - waf_origin:     可选，证书级默认源站，供未写 origin 的 WAF 域名复用
-阿里云账号 AK/SK 放在 config/.env（形如 CN1_AK / CN1_SK / CN1_REGION），不再写入 certs.yaml。
-WAF 实例按账号配 <账号名大写>_WAF_INSTANCE_ID / _WAF_REGION（如 CN1_/INTL1_），全局 WAF_INSTANCE_ID 兜底。
-每个证书只签发一次，按「证书 + 部署账号」分组，每组只上传一次。
+  - waf_id:         可选，证书级 WAF 实例 ID（域名级可覆盖）；留空则按 deploy 平台的 deploy_account 自动发现
+账号层级（aliyun_cn / aliyun_intl / cloudflare，下一层为账号名）写在 certs.yaml；AK/SK 等敏感值放 config/.env（CN1_AK / CN1_SK 等），用 ${VAR} 注入，region 写在 yaml。
+WAF 实例 ID 优先级：证书 waf_id > <平台>_<账号>_WAF_INSTANCE_ID（如 ALIYUN_CN_CN1_WAF_INSTANCE_ID）> <账号>_WAF_INSTANCE_ID（如 CN1_）> 全局 WAF_INSTANCE_ID；全部为空时签发前先按 deploy 平台/账号调 DescribeInstance 列实例，单实例自动用、多实例需显式填。
+每个证书只签发一次，按「证书 + 部署平台 + 部署账号」分组，每组只上传一次。
 
 支持国内站 / 国际站两套阿里云账号部署；DNS 验证可分别走阿里云 DNS 或 Cloudflare（按证书配置）。
 告警（Prometheus / 到期前两周）后续接入，本脚本只负责签发与替换。
@@ -157,39 +158,61 @@ def _as_list(v):
     return [v] if isinstance(v, str) else list(v)
 
 
-def deploy_items(items, default_account, with_origin=False, default_origin=None):
-    """把 dcdn_domains / waf_domains 统一成 [{domain, deploy_account, ...}]；支持字符串简写。
-    with_origin=True 时保留 origin（WAF 自动接入的源站地址，字符串或列表）；
-    域名没写时用 default_origin（证书级 waf_origin）；backends 作为旧别名兼容。
+def deploy_items(items, default_account, with_origin=False, default_origin=None,
+                 default_platform=None, default_waf_id=None, platform_accounts=None):
+    """把 dcdn_domains / waf_domains 统一成 [{domain, deploy, deploy_account, ...}]；支持字符串简写。
+    deploy=部署平台（如 aliyun_cn），deploy_account=该平台下账号名，二者配对确定用哪个账号部署。
+    域名项只写 deploy 未写 deploy_account 时，按 platform_accounts 推断该平台下的默认账号，
+    避免跨账号错配（如只写 aliyun_intl 却落到证书级默认的 cn1）。
+    with_origin=True 时保留 origin（WAF 自动接入源站，字符串或列表；域名级 waf_origin/backends
+    亦可），并把证书级 waf_id 下发给同账号域名项（域名级 waf_id 可覆盖，便于同一证书 WAF
+    分属不同账号时用各自实例）；default_origin 为证书级 waf_origin。
     若 items 本身是字符串（如 waf_domains: "a.com"），当成单元素列表处理，避免逐字符拆分。"""
     if isinstance(items, str):
         items = [items]
     out = []
     for item in items or []:
         if isinstance(item, str):
-            row = {"domain": item.strip(), "deploy_account": default_account}
+            row = {"domain": item.strip(), "deploy": default_platform, "deploy_account": default_account}
         elif isinstance(item, dict):
+            deploy = item.get("deploy") or default_platform
+            acct = item.get("deploy_account") or item.get("account")
+            if not acct and deploy and platform_accounts:
+                acct = platform_accounts.get(deploy)
+            acct = acct or default_account
             row = {
                 "domain": str(item.get("domain") or "").strip(),
-                "deploy_account": item.get("deploy_account") or item.get("account") or default_account,
+                "deploy": deploy,
+                "deploy_account": acct,
             }
         else:
-            row = {"domain": "", "deploy_account": default_account}
+            row = {"domain": "", "deploy": default_platform, "deploy_account": default_account}
         if with_origin:
-            raw = item.get("origin") or item.get("backends") if isinstance(item, dict) else None
+            raw = (item.get("origin") or item.get("waf_origin") or item.get("backends")
+                   if isinstance(item, dict) else None)
             origin = _as_list(raw) or _as_list(default_origin)
             if origin:
                 row["origin"] = origin
+            item_waf_id = (item.get("waf_id") or "").strip() if isinstance(item, dict) else ""
+            # 证书级 waf_id 只继承给「部署平台/账号与证书级相同」的域名；
+            # 域名若改到了别的账号，那个实例不通用，必须自己写 waf_id 或留空自动发现。
+            same_target = (row["deploy"] == default_platform
+                           and row["deploy_account"] == default_account)
+            row["waf_id"] = item_waf_id or ((default_waf_id or "").strip() if same_target else "")
         out.append(row)
     return out
 
 
-def dcdn_items(items, default_account):
-    return deploy_items(items, default_account)
+def dcdn_items(items, default_account, default_platform=None, platform_accounts=None):
+    return deploy_items(items, default_account, default_platform=default_platform,
+                        platform_accounts=platform_accounts)
 
 
-def waf_items(items, default_account, default_origin=None):
-    return deploy_items(items, default_account, with_origin=True, default_origin=default_origin)
+def waf_items(items, default_account, default_origin=None, default_platform=None,
+              default_waf_id=None, platform_accounts=None):
+    return deploy_items(items, default_account, with_origin=True,
+                        default_origin=default_origin, default_platform=default_platform,
+                        default_waf_id=default_waf_id, platform_accounts=platform_accounts)
 
 
 def normalize_config(cfg):
@@ -208,6 +231,20 @@ def normalize_config(cfg):
         single = {k: cf[k] for k in ("api_token", "account_id", "email") if k in cf}
         cfg["cloudflare"] = {"default": single}
         cf = cfg["cloudflare"]
+    # 平台 -> 该平台下第一个账号名，供域名项只写 deploy 未写 deploy_account 时推断。
+    # 顶层 aliyun_cn / aliyun_intl / cloudflare 分组即平台；旧 accounts 写法无分组则跳过。
+    platform_accounts = {}
+    for pkey, pval in cfg.items():
+        if isinstance(pval, dict) and pkey not in ("accounts", "cloudflare", "certificates"):
+            for aname in pval:
+                if isinstance(pval[aname], dict):
+                    platform_accounts[pkey] = aname
+                    break
+    if isinstance(cf, dict):
+        for aname in cf:
+            if isinstance(cf[aname], dict):
+                platform_accounts.setdefault("cloudflare", aname)
+                break
     certs = cfg.get("certificates") or []
     norm = []
     for raw in certs if isinstance(certs, list) else []:
@@ -220,9 +257,15 @@ def normalize_config(cfg):
             c["dns_account"] = (next(iter(cf), None) if dns_kind(c["dns"]) == "cloudflare"
                                 else (c.get("account") or first_acc))
         default_deploy = c.get("deploy_account") or c.get("account") or first_acc
-        c["dcdn_domains"] = dcdn_items(c.get("dcdn_domains"), default_deploy)
+        default_platform = c.get("deploy") or c.get("platform")
+        c["dcdn_domains"] = dcdn_items(c.get("dcdn_domains"), default_deploy,
+                                       default_platform=default_platform,
+                                       platform_accounts=platform_accounts)
         c["waf_domains"] = waf_items(c.get("waf_domains"), default_deploy,
-                                     default_origin=c.get("waf_origin"))
+                                     default_origin=c.get("waf_origin"),
+                                     default_platform=default_platform,
+                                     default_waf_id=c.get("waf_id"),
+                                     platform_accounts=platform_accounts)
         norm.append(c)
 
     # 先补齐 name / domains，供旧格式的自动匹配使用。省略 domains 时由 dcdn + waf 域名
@@ -253,6 +296,7 @@ def normalize_config(cfg):
             continue
         cert["dcdn_domains"].append({
             "domain": domain,
+            "deploy": dd.get("deploy") or cert.get("deploy") or cert.get("platform"),
             "deploy_account": dd.get("deploy_account") or dd.get("account")
                               or cert.get("deploy_account") or first_acc,
         })
@@ -775,42 +819,44 @@ def describe_and_list_waf_instances(client, region):
 
 # 每个账号自动发现到的 WAF 实例 ID，按账号名缓存（本次进程内复用，避免重复调接口）
 _WAF_ID_CACHE = {}
-# 预检阶段已尝试过自动发现的账号，避免后面部署时重复查询/打印
-_WAF_DISCOVERED_ACCOUNTS = set()
 
 
-def waf_account_env(account_name, suffix):
-    """取账号级 WAF 配置：CN1_WAF_INSTANCE_ID / ALIYUN_CN1_WAF_INSTANCE_ID -> 账号 cn1。
-    找不到账号级再退到全局 WAF_<suffix>。"""
+def waf_account_env(account_name, suffix, platform=None):
+    """取账号级 WAF 配置，按优先级尝试（平台+账号 > 账号 > 全局）：
+      <PLATFORM>_<ACCOUNT>_WAF_<SUFFIX>  如 ALIYUN_CN_CN1_WAF_INSTANCE_ID（平台 aliyun_cn）
+      <ACCOUNT>_WAF_<SUFFIX>            如 CN1_WAF_INSTANCE_ID
+      ALIYUN_<ACCOUNT>_WAF_<SUFFIX>     兼容旧写法
+      WAF_<SUFFIX>                      全局兜底"""
     up = (account_name or "").upper()
-    for prefix in (up, "ALIYUN_" + up):
-        if not prefix:
-            continue
+    prefixes = []
+    if platform:
+        plat = str(platform).upper()  # aliyun_cn -> ALIYUN_CN
+        prefixes.append(f"{plat}_{up}" if up else plat)
+    prefixes += [up, "ALIYUN_" + up] if up else []
+    for prefix in prefixes:
         v = (os.environ.get(f"{prefix}_WAF_{suffix}") or "").strip()
         if v:
             return v
     return (os.environ.get(f"WAF_{suffix}") or "").strip()
 
 
-def get_waf_instance_id(client, region, account_name=None):
-    """按账号取 WAF 实例 ID：账号级配置 > 全局配置 > 自动发现（单实例自动用，多实例报错）。
-    国内站/国际站账号各自配各自的 <账号名>_WAF_INSTANCE_ID；全局 WAF_INSTANCE_ID 作兜底。"""
-    key = (account_name or "").lower()
-    iid = waf_account_env(account_name, "INSTANCE_ID")
+def get_waf_instance_id(client, region, account_name=None, platform=None, configured_id=None):
+    """取 WAF 实例 ID：证书 waf_id > 平台+账号 > 账号 > 全局 > 自动发现（单实例自动用，多实例报错）。"""
+    key = (f"{platform}.{account_name}" if platform else account_name or "").lower()
+    iid = (configured_id or "").strip() or waf_account_env(account_name, "INSTANCE_ID", platform)
     if iid:
         return iid
     if key in _WAF_ID_CACHE:
         return _WAF_ID_CACHE[key]
-    if key in _WAF_DISCOVERED_ACCOUNTS:
-        # 预检已查过但没确定出唯一实例，不重复查询/打印
-        return None
-    var_hint = (f"{(account_name or '').upper()}_WAF_INSTANCE_ID"
-                if account_name else "WAF_INSTANCE_ID")
+    who = f"平台 {platform} / 账号 {account_name}" if platform else f"账号 {account_name or '-'}"
+    var_hint = (f"{(platform or '').upper()}_{(account_name or '').upper()}_WAF_INSTANCE_ID"
+                if platform and account_name else
+                (f"{(account_name or '').upper()}_WAF_INSTANCE_ID" if account_name else "WAF_INSTANCE_ID"))
+    log(f"[INFO] {who} 未配 WAF 实例 ID，调用 DescribeInstance 获取实例列表…")
     try:
         items = describe_and_list_waf_instances(client, region)
     except Exception as e:
         log(f"[WARN] 查询 WAF 实例失败: {e}；请在 .env 配置 {var_hint}")
-        _WAF_DISCOVERED_ACCOUNTS.add(key)
         return None
     active = [it for it in items if it.get("Status") in (1, "1") and str(it.get("InDebt")) != "1"]
     if len(active) == 1:
@@ -825,7 +871,6 @@ def get_waf_instance_id(client, region, account_name=None):
     else:
         log(f"[ERROR] 账号 {account_name or '-'} 在 region={region} 查到 {len(active)} 个可用 WAF 实例，"
             f"请在 .env 明确写 {var_hint}=<上面任一 InstanceId> 后重跑")
-    _WAF_DISCOVERED_ACCOUNTS.add(key)
     return None
 
 
@@ -888,14 +933,19 @@ def waf_wait_cert_visible(client, region, iid, cert_number, tries=6, interval=10
     return fallback
 
 
-def deploy_waf_group(cert, account, acc_name, items, force):
+def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_id=None):
     """WAF 3.0 部署：证书换名上传到 CAS（acme_waf_ 前缀，避开 DCDN 同名冲突），
-    逐域名查 443/当前证书做幂等；确实未接入且配了源站（origin/waf_origin）则自动以 HTTP 接入。"""
-    waf_region = waf_account_env(acc_name, "REGION") or account.get("region") or "cn-hangzhou"
+    逐域名查 443/当前证书做幂等；确实未接入且配了源站（origin/waf_origin）则自动以 HTTP 接入。
+    platform=部署平台（如 aliyun_cn），与 acc_name 配对决定用哪个账号/平台的 WAF 实例；
+    waf_id=证书级实例 ID（可选），留空则按该平台/账号自动发现。"""
+    waf_region = waf_account_env(acc_name, "REGION", platform) or account.get("region") or "cn-hangzhou"
     client = make_client(account)
-    iid = get_waf_instance_id(client, waf_region, acc_name)
+    iid = get_waf_instance_id(client, waf_region, acc_name, platform, configured_id=waf_id)
     if not iid:
-        log(f"[ERROR] 账号 {acc_name} 缺少 WAF 实例 ID（.env 配 {(acc_name or '').upper()}_WAF_INSTANCE_ID "
+        plat_up = (platform or "").upper()
+        acc_up = (acc_name or "").upper()
+        log(f"[ERROR] 平台 {platform or '-'} 账号 {acc_name} 缺少 WAF 实例 ID"
+            f"（证书 waf_id / .env 配 {plat_up}_{acc_up}_WAF_INSTANCE_ID / {acc_up}_WAF_INSTANCE_ID "
             f"或全局 WAF_INSTANCE_ID），跳过该组 WAF 部署")
         return
 
@@ -1019,37 +1069,44 @@ def process(cfg, force=False):
     cf = cfg.get("cloudflare") or {}
     certs = cfg.get("certificates") or []
 
-    # 0) WAF 实例预检：各 WAF 部署账号独立发现自己的实例（国内站/国际站各查各的）。
-    #    账号级 <NAME>_WAF_INSTANCE_ID > 全局 WAF_INSTANCE_ID > 自动发现（单实例自动用）。
+    # 0) WAF 实例预检：签发前按各 WAF 部署 (平台, 账号) 独立发现实例（国内站/国际站各查各的）。
+    #    waf_id（域名项级 > 证书级）> 账号级 <NAME>_WAF_INSTANCE_ID > 全局 > 自动发现。
+    #    该 (平台,账号) 下若有任一 WAF 域名既没写 waf_id、环境也没配实例 ID，才需要预检发现。
     #    多实例/无实例只影响该账号的 WAF 部署，不阻断证书签发与 DCDN。
-    waf_cert_accounts = set()
+    waf_pairs = {}  # (platform, account) -> 是否需要发现
     for c in certs:
         for dd in (c.get("waf_domains") or []):
-            if isinstance(dd, dict) and dd.get("deploy_account"):
-                waf_cert_accounts.add(dd["deploy_account"])
-            elif c.get("deploy_account"):
-                waf_cert_accounts.add(c["deploy_account"])
-    for acc_name in sorted(waf_cert_accounts):
+            platform = dd.get("deploy") or c.get("deploy")
+            acc_name = dd.get("deploy_account") or c.get("deploy_account")
+            if not acc_name:
+                continue
+            wid = (dd.get("waf_id") or "").strip()
+            resolved = bool(wid or waf_account_env(acc_name, "INSTANCE_ID", platform))
+            k = (platform, acc_name)
+            waf_pairs[k] = waf_pairs.get(k, False) or (not resolved)
+    for (platform, acc_name), need_discover in sorted(waf_pairs.items(),
+                                                      key=lambda x: (x[0][0] or "", x[0][1] or "")):
+        if not need_discover:
+            continue  # 该组全部已由证书 waf_id 或环境指定，无需查询
         acc = accounts.get(acc_name)
         if not (isinstance(acc, dict) and acc.get("access_key")):
             continue
-        if waf_account_env(acc_name, "INSTANCE_ID"):
-            continue  # 已显式配置，无需查询
-        if (acc_name or "").lower() in _WAF_ID_CACHE or (acc_name or "").lower() in _WAF_DISCOVERED_ACCOUNTS:
+        key = f"{platform}.{acc_name}".lower()
+        if key in _WAF_ID_CACHE:
             continue
-        region = waf_account_env(acc_name, "REGION") or acc.get("region") or "cn-hangzhou"
-        log(f"[INFO] 账号 {acc_name} 未配 WAF 实例 ID，签发前先查询实例…")
+        region = waf_account_env(acc_name, "REGION", platform) or acc.get("region") or "cn-hangzhou"
+        log(f"[INFO] 平台 {platform or '-'} 账号 {acc_name} 未配 WAF 实例 ID，签发前先查询实例…")
         try:
-            get_waf_instance_id(make_client(acc), region, acc_name)
+            get_waf_instance_id(make_client(acc), region, acc_name, platform)
         except Exception as e:
-            log(f"[WARN] 账号 {acc_name} 预检 WAF 实例失败: {e}")
-    if waf_cert_accounts:
-        unresolved = [a for a in sorted(waf_cert_accounts)
-                      if not waf_account_env(a, "INSTANCE_ID")
-                      and (a or "").lower() not in _WAF_ID_CACHE]
+            log(f"[WARN] 平台 {platform or '-'} 账号 {acc_name} 预检 WAF 实例失败: {e}")
+    if waf_pairs:
+        unresolved = [(p, a) for (p, a), need in sorted(
+                          waf_pairs.items(), key=lambda x: (x[0][0] or "", x[0][1] or ""))
+                      if need and f"{p}.{a}".lower() not in _WAF_ID_CACHE]
         if unresolved:
-            log(f"[WARN] 账号 {unresolved} 未确定 WAF 实例 ID，对应 WAF 部署将跳过；"
-                "dcdn 证书签发/绑定不受影响（可用 --list-waf-instances 查看后填入 .env）")
+            log(f"[WARN] 平台/账号 {unresolved} 未确定 WAF 实例 ID，对应 WAF 部署将跳过；"
+                "dcdn 证书签发/绑定不受影响（证书可配 waf_id，或用 --list-waf-instances 查看后填入 .env）")
 
     # 1) 签发所有证书（每张只签一次）
     for c in certs:
@@ -1062,12 +1119,15 @@ def process(cfg, force=False):
             field = "dcdn_domains" if kind == "dcdn" else "waf_domains"
             for dd in c.get(field) or []:
                 domain, acc_name = dd.get("domain"), dd.get("deploy_account")
+                platform = dd.get("deploy")
                 account = accounts.get(acc_name)
                 if not (domain and account):
                     continue
-                key = (c["name"], acc_name)
+                key = (c["name"], platform, acc_name)
+                item_waf_id = (dd.get("waf_id") or "").strip() if isinstance(dd, dict) else ""
                 g = groups.setdefault(key, {"cert": c, "account": account,
-                                            "acc_name": acc_name, "domains": []})
+                                            "acc_name": acc_name, "platform": platform,
+                                            "waf_id": item_waf_id, "domains": []})
                 if domain not in [x["domain"] if isinstance(x, dict) else x for x in g["domains"]]:
                     g["domains"].append(dd if kind == "waf" else domain)
 
@@ -1077,7 +1137,8 @@ def process(cfg, force=False):
     if waf_groups:
         log(f"[INFO] 检测到 {len(waf_groups)} 个 WAF 部署组，开始处理")
     for g in waf_groups.values():
-        deploy_waf_group(g["cert"], g["account"], g["acc_name"], g["domains"], force)
+        deploy_waf_group(g["cert"], g["account"], g["acc_name"], g["domains"], force,
+                         platform=g.get("platform"), waf_id=g.get("waf_id"))
 
 
 def main():
@@ -1110,9 +1171,10 @@ def main():
                 describe_and_list_waf_instances(make_client(acc), region)
             except Exception as e:
                 log(f"[ERROR] 账号 {name} 查询 WAF 实例失败: {e}")
-        log("提示：把选定的 InstanceId 写入 config/.env 的 <账号名大写>_WAF_INSTANCE_ID"
-            "（如 CN1_WAF_INSTANCE_ID / INTL1_WAF_INSTANCE_ID）；如需改地域写 <账号名>_WAF_REGION。"
-            "所有账号共用一个实例时才用全局 WAF_INSTANCE_ID")
+        log("提示：把选定的 InstanceId 写入 config/.env 的 <平台大写>_<账号大写>_WAF_INSTANCE_ID"
+            "（如 ALIYUN_CN_CN1_WAF_INSTANCE_ID / ALIYUN_INTL_INTL1_WAF_INSTANCE_ID）；"
+            "兼容旧写法 <账号名大写>_WAF_INSTANCE_ID（CN1_WAF_INSTANCE_ID / INTL1_WAF_INSTANCE_ID）；"
+            "如需改地域写 <平台>_<账号>_WAF_REGION。所有账号共用一个实例时才用全局 WAF_INSTANCE_ID")
         return
     errors, warnings = validate_config(cfg)
     for w in warnings:
@@ -1123,14 +1185,20 @@ def main():
         sys.exit(1)
     if args.check:
         for c in cfg["certificates"]:
-            accs = sorted({d["deploy_account"] for d in c["dcdn_domains"]}
-                          | {d["deploy_account"] for d in (c.get("waf_domains") or [])})
+            pairs = sorted({(d.get("deploy"), d["deploy_account"]) for d in c["dcdn_domains"]}
+                           | {(d.get("deploy"), d["deploy_account"])
+                              for d in (c.get("waf_domains") or [])},
+                           key=lambda x: (x[0] or "", x[1] or ""))
+            deploy_desc = ", ".join(f"{p or '-'}/{a}" for p, a in pairs) or "无"
             waf = c.get("waf_domains") or []
             waf_desc = ", ".join(
                 d["domain"] + (f"(源站 {','.join(d['origin'])})" if d.get("origin") else "")
                 for d in waf) or "无"
+            waf_id_desc = (c.get("waf_id") or "").strip() or "自动发现"
             log(f"[OK] 证书 {c['name']}: 主域名={c['domains'][0]}, SAN={c['domains']}, "
-                f"DCDN {len(c['dcdn_domains'])} 个, WAF {len(waf)} 个 [{waf_desc}], 部署账号={accs}")
+                f"DCDN {len(c['dcdn_domains'])} 个, WAF {len(waf)} 个 [{waf_desc}], "
+                f"部署平台/账号={deploy_desc}"
+                + (f", WAF 实例={waf_id_desc}" if waf else ""))
         log(f"[OK] 配置校验通过：{len(cfg['certificates'])} 张证书")
         return
     check_acme()

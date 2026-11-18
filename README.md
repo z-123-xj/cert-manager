@@ -82,9 +82,9 @@ cloudflare:
     account_id: "${CF_ACCOUNT_ID_1}"
 ```
 
-第一层是**平台**、第二层是**账号名**，与证书字段一一对应：证书的 `dns` 填平台名（`aliyun_cn` / `aliyun_intl` / `cloudflare`），`dns_account` 填该平台下的账号名（`cn1` / `intl1` / `cloudflare1`），`deploy_account` 同样引用账号名。脚本加载时把所有 `aliyun_*` 分组下的账号拍平成一个表。旧写法 `dns: aliyun` + `accounts:` 仍兼容（`aliyun` 视为阿里云 DNS）。
+第一层是**平台**、第二层是**账号名**，与证书字段一一对应：证书的 `dns` 填平台名（`aliyun_cn` / `aliyun_intl` / `cloudflare`），`dns_account` 填该平台下的账号名（`cn1` / `intl1` / `cloudflare1`）；部署同理用 `deploy`（平台）+ `deploy_account`（账号名）配对，决定「调用哪个平台、哪个账号」。脚本加载时把所有 `aliyun_*` 分组下的账号拍平成一个表。旧写法 `dns: aliyun` + `accounts:` 仍兼容（`aliyun` 视为阿里云 DNS）。
 
-`.env` 只放扁平的 key=value 值（`CN1_AK` / `INTL1_AK` / `CF_TOKEN_1` 等）。**WAF 实例 ID 也放 `.env`**：按账号配 `<账号名大写>_WAF_INSTANCE_ID`（如 `CN1_WAF_INSTANCE_ID` / `INTL1_WAF_INSTANCE_ID`）+ 可选 `_WAF_REGION`；全局 `WAF_INSTANCE_ID` / `WAF_REGION` 是所有账号共用一个实例时的兜底（优先级低于账号级）。留空时脚本对每个 WAF 账号分别调 `DescribeInstance`：仅 1 个正常实例自动选用，多个则要求显式写（用 `--list-waf-instances` 查看）。国内站/国际站各查各的账号与地域，互不混用。
+`.env` 只放扁平的 key=value 值（`CN1_AK` / `INTL1_AK` / `CF_TOKEN_1` 等）。**WAF 实例 ID 也放 `.env`**：按 `<平台>_<账号>` 配 `<平台大写>_<账号大写>_WAF_INSTANCE_ID`（如 `ALIYUN_CN_CN1_WAF_INSTANCE_ID` / `ALIYUN_INTL_INTL1_WAF_INSTANCE_ID`），兼容旧写法 `<账号大写>_WAF_INSTANCE_ID`（如 `CN1_WAF_INSTANCE_ID` / `INTL1_WAF_INSTANCE_ID`）+ 可选 `_WAF_REGION`；全局 `WAF_INSTANCE_ID` / `WAF_REGION` 是所有账号共用一个实例时的兜底。优先级：**平台+账号 > 账号 > 全局**。留空时脚本在**签发前**对每个 WAF `(平台, 账号)` 分别调 `DescribeInstance` 并打印实例详情：仅 1 个正常实例自动选用，多个则报错要求显式写（用 `--list-waf-instances` 查看）。国内站/国际站各查各的账号与地域，互不混用。
 
 服务器 crontab 内联的同名环境变量优先级高于 `.env`。国际站账号 `region: ap-southeast-1` 必须写在 yaml，否则默认 `cn-hangzhou` 会调错。
 
@@ -94,24 +94,48 @@ cloudflare:
 certificates:
   - name: "example.org"            # 可选：证书标识 = CAS 证书名前缀；省略时取主域名
     dns: aliyun_cn                  # 可选，默认 aliyun_cn（aliyun_cn / aliyun_intl / cloudflare）
-    dns_account: cloudflare1       # DNS-01 验证账号
-    deploy_account: intl1          # 可选：证书级默认部署账号
+    dns_account: cloudflare1       # DNS-01 验证账号（该平台下的账号名）
+    deploy: aliyun_intl             # 可选：证书级默认部署平台（aliyun_cn / aliyun_intl）
+    deploy_account: intl1          # 可选：证书级默认部署账号（该平台下的账号名）
     # domains: ["example.org", "*.example.org"]   # 可选：需要泛域/裸域/额外 SAN 时写
     dcdn_domains:
-      - "www.example.org"          # 字符串简写：用证书级 deploy_account
+      - "www.example.org"          # 字符串简写：用证书级 deploy + deploy_account
       - "api.example.org"
-      - domain: "cn.example.org"   # 需要换账号时才展开成对象
+      - domain: "cn.example.org"   # 需要换平台/账号时才展开成对象
+        deploy: aliyun_cn
         deploy_account: cn1
     waf_origin: ["1.2.3.4"]         # 可选：证书级源站，供所有 waf_domains 共用
+    waf_id:                         # 可选：证书级 WAF 实例 ID；留空则按 deploy 平台 + deploy_account 自动发现
     waf_domains:                    # 可选：WAF 3.0 防护域名（字符串列表即可）
       - "waf.example.org"          # 已接入 WAF：仅替换证书
       - "new.example.org"          # 未接入：用 waf_origin 自动接入（HTTP 80 起步）
-    # 仅当某域名源站/账号与证书级不同时，才展开成 {domain, origin, deploy_account} 对象
+    # 仅当某域名源站/平台/账号与证书级不同时，才展开成 {domain, origin, deploy, deploy_account} 对象
 ```
 
 - **`domains`（可选）**：真正签进证书的 SAN 列表（裸域 / 泛域 / 子域），每项拆成 `-d`。**省略时由 `dcdn_domains` + `waf_domains` 的域名去重推导**（排序后首项为主域名，也就是 acme.sh 目录名）。需要泛域 `*.example.org`、裸域、或只签不部署的域名时必须显式写。推导模式下每新增一个域名都会改变 SAN → 触发重签，所以**域名较多或需要泛域时建议显式写 `domains`**。
-- **`dcdn_domains`**：要绑定的 DCDN 加速域名。字符串简写用证书级 `deploy_account`；写成 `{domain, deploy_account}` 可覆盖账号，因此一张证书可同时部署到国内站和国际站。
+- **`deploy` / `deploy_account`**：部署平台（`aliyun_cn` / `aliyun_intl`）+ 该平台下的账号名，二者配对确定「调用哪个平台、哪个账号」。证书级写一次作为默认，单个域名可用同名字段覆盖；**覆盖 `deploy_account` 时务必同时写对 `deploy`**（例如 `deploy: aliyun_cn` + `deploy_account: cn1`），否则会错误继承证书级平台。WAF 实例 ID 与地域也按这个配对去 `.env` 里找。
+- **`dcdn_domains`**：要绑定的 DCDN 加速域名。字符串简写用证书级 `deploy` / `deploy_account`；写成 `{domain, deploy, deploy_account}` 可覆盖平台与账号，因此一张证书可同时部署到国内站和国际站。
+- **同一张证书 DCDN 与 WAF 分属不同账号**：可以每个域名项各自写 `deploy`（更清晰），也可在证书级写 `deploy`/`deploy_account` 作默认、个别域名项覆盖。**域名项只写 `deploy` 未写 `deploy_account` 时，自动取该平台分组下的第一个账号**（如 `aliyun_intl` → `intl1`），不会错落到别的平台账号。DCDN 与 WAF 按各自的 `(证书, 平台, 账号)` 分组，互不干扰：
+
+  ```yaml
+  - name: "mix.example.com"
+    dns: cloudflare
+    dns_account: cloudflare1
+    domains: ["mix.example.com", "*.mix.example.com"]
+    dcdn_domains:
+      - domain: "cdn.mix.example.com"
+        deploy: aliyun_intl          # 自动取 intl1
+    waf_domains:
+      - domain: "waf.mix.example.com"
+        waf_origin: "47.84.116.133"  # 源站也可写在域名项（等同 origin）
+        deploy: aliyun_intl
+        deploy_account: intl1
+        waf_id:                      # 留空 -> 按 aliyun_intl/intl1 自动发现实例
+  ```
+
+  证书级 `waf_origin` / `waf_id` 仍可作为所有 WAF 域名的默认；域名项写了就以域名项为准。
 - **`waf_domains`**：要绑定的 WAF 3.0 防护域名，写法同 `dcdn_domains`，额外支持 `origin`（源站 IP/域名，字符串或列表；旧名 `backends` 仍兼容）。**WAF 与 DCDN 用不同的 CAS 证书名前缀**（`acme_waf_` vs `acme_`），避免先部署 WAF 占用名字导致 DCDN 报 `CertNameAlreadyExists`。
+- **`waf_id`（可选）**：WAF 实例 ID。证书级写一次作默认；若证书的 WAF 域名分属不同账号，可在 `waf_domains` 的域名对象里单独写 `waf_id` 覆盖。留空时脚本按该域名的 `deploy` 平台 + `deploy_account` 调 `DescribeInstance` 自动发现（单实例自动用、多实例报错要求显式填）。优先级：**域名 `waf_id` > 证书 `waf_id` > `.env` 的 `<平台>_<账号>_WAF_INSTANCE_ID` / `<账号>_WAF_INSTANCE_ID` / 全局 `WAF_INSTANCE_ID` > 自动发现**。写在证书上后，`.env` 的 `CN1_WAF_INSTANCE_ID` 等就只是**兜底**（证书没写 waf_id 时才用），二者不冲突。
 - **`waf_origin`（可选）**：证书级默认源站，域名没写 `origin` 时统一用它，省得每个 WAF 域名重复写。
   脚本以**接入域名为准**逐个判定（DescribeDomains 按域名过滤）：
   - 已接入且 443 已开、证书一致 → 跳过；证书不同 → `ModifyDomainCert` 只切证书引用；
@@ -120,13 +144,13 @@ certificates:
   - 接入状态查询失败 → 本次跳过（不自动接入，避免误判重复创建）。
 - **`dns` / `dns_account`**：`dns` 是平台名 —— `aliyun_cn` / `aliyun_intl` 用对应 `aliyun_*` 分组账号的 AK 去阿里云 DNS 加 TXT（acme.sh `dns_ali`），`cloudflare` 用 `cloudflare` 段下账号的 API Token（`dns_cf`）。`dns_account` 是平台下的账号名（如 `cn1`/`intl1`/`cloudflare1`）；省略时取对应段的第一个账号。旧写法 `dns: aliyun` 仍视为阿里云 DNS。`cloudflare` 单账号旧写法也会自动归一化。
 
-DNS 在 Cloudflare、DCDN/WAF 在阿里云互不影响的用法仍然支持。每个证书只签发一次，按「证书 + 部署账号」分组，每组只上传一次。
+DNS 在 Cloudflare、DCDN/WAF 在阿里云互不影响的用法仍然支持。每个证书只签发一次，按「证书 + 部署平台 + 部署账号」分组，每组只上传一次。
 
 启动时会在**加载期校验**：账号引用存在、证书 SAN 覆盖 DCDN/WAF 域名、`name` 唯一、域名不跨证书重复；有错直接退出。用 `python3 certmgr.py --config config/certs.yaml --check` 可只校验并打印归一化后的证书与分组，不签发、不部署、也不要求装 acme.sh。
 
-**旧配置迁移**：顶层 `dcdn_domains` 仍会被自动识别并回填；`accounts` 段若仍写在 yaml 也能用（同名被 .env 覆盖）。建议逐步把 `accounts` 搬进 `.env`、把顶层 `dcdn_domains` 移进各证书。
+**旧配置迁移**：顶层 `dcdn_domains` 仍会被自动识别并回填；旧写法 `dns: aliyun` + 顶层 `accounts:` 仍兼容。建议把顶层 `accounts` 改成 `aliyun_cn` / `aliyun_intl` 分组、把顶层 `dcdn_domains` 移进各证书，并给每张证书补 `deploy` / `deploy_account`。
 
-**多账号**：阿里云在 `.env` 里加任意多组 `<名>_AK/_SK`（如 `cn1` / `intl1` / `cn2`）；
+**多账号**：阿里云在对应 `aliyun_*` 分组下加账号（如 `cn1` / `intl1` / `cn2`），AK/SK 的值写 `.env` 的 `<名>_AK` / `<名>_SK`；
 Cloudflare 在 `cloudflare` 下用命名子账号（如 `cloudflare1` / `cloudflare2`），`dns_account` 指定具体哪一个。
 
 ## 运行（服务器原生，无 Docker）
@@ -151,7 +175,8 @@ python3 certmgr.py --config config/certs.yaml --check
 # 4b) 如启用了 waf_domains 但不知道 WAF_INSTANCE_ID 填哪个：列出各账号的 WAF 实例详情
 python3 certmgr.py --config config/certs.yaml --list-waf-instances
 python3 certmgr.py --config config/certs.yaml --list-waf-instances --account cn1   # 只看某账号
-# 把输出的 InstanceId 填进 .env 对应账号的 CN1_WAF_INSTANCE_ID / INTL1_WAF_INSTANCE_ID；
+# 把输出的 InstanceId 填进 .env 对应平台+账号的 ALIYUN_CN_CN1_WAF_INSTANCE_ID /
+# ALIYUN_INTL_INTL1_WAF_INSTANCE_ID（或旧写法 CN1_WAF_INSTANCE_ID / INTL1_WAF_INSTANCE_ID）；
 # 每个账号输出会同时显示 region 和当前配置的实例，按账号分别填；留空且单实例时自动选用
 
 # 5) 立即执行一次
@@ -182,7 +207,7 @@ WAF 首次接入注意：`CreateDomain` 要求域名已完成**域名归属权�
 - `~/.acme.sh` 是 acme.sh 证书与 Let's Encrypt 账号目录，**不要删除**，否则已签发证书与账号会丢失，频繁重签可能触发 LE 速率限制。
 - `name` 决定 CAS 证书名前缀（`acme_<name>_`）。改 `name` 会让旧前缀证书不再被自动清理（脚本只清理当前前缀），已有证书如非必要不要改名。
 - 泛域 `*.example.org` 只覆盖一级子域（如 `www.example.org`），**不含**裸域 `example.org`，也不含 `a.b.example.org`；这类域名必须显式列进 `domains`，否则加载期校验会报错。
-- 国际站账号的 `region` 写在 `config/.env` 的 `INTL1_REGION=ap-southeast-1`（不写会按默认 `cn-hangzhou`，导致国际站 API 调错）；如需指定 `endpoint` 写 `INTL1_ENDPOINT`。
+- 国际站账号的 `region` 写在 `config/certs.yaml` 对应账号下（`region: ap-southeast-1`，不写会按默认 `cn-hangzhou` 导致 API 调错）；如需指定 `endpoint` 也写在 yaml 同层。WAF 地域可用 `.env` 的 `<平台>_<账号>_WAF_REGION`（如 `ALIYUN_INTL_INTL1_WAF_REGION`）单独覆盖。
 - 阿里云 CAS / DCDN SDK 的接口参数若随版本变化，以阿里云官方文档为准微调 `certmgr.py` 中对应请求即可。
 
 ## 后续（告警）
