@@ -892,9 +892,9 @@ def _ali_txt_upsert(domain, name, value, cfg, acc_name, platform):
 # 只有首次开 443 才需要 ModifyDomain（必须带 Listen + Redirect）。
 WAF_API_VERSION = "2021-10-01"
 # 开 443 时从 DescribeDomainDetail 透传的 Listen 字段。
-# 刻意不含 TLSVersion/CipherSuite/EnableTLSv3/CustomCiphers/SM2* 等 TLS/国密配置字段：
-# 刚以 HTTP 接入的域名这些值是空串或无效值，原样透传会让 ModifyDomain 报 InvalidTLS；
-# 不传即让 WAF 用默认 TLS 配置，CertId/HttpsPorts 在下方显式设置。
+# 刻意不含 TLSVersion/CipherSuite/SM2* 等字段：新接入域名的这些值是空串/无效值，透传会报错；
+# TLS 配置改由 waf_open_443_and_bind 显式设置为合法值（tlsv1.2 + 套件 1），
+# 否则不传会让 WAF 用无效默认 → InvalidTLS。CertId/HttpsPorts 也在那里显式设置。
 WAF_LISTEN_FIELDS = ("HttpPorts", "Http2Enabled", "XffHeaderMode", "XffHeaders",
                      "IPv6Enabled", "ProtectionResource", "ExclusiveIp")
 WAF_REDIRECT_FIELDS = ("Backends", "Loadbalance", "FocusHttpBackend", "SniEnabled", "SniHost",
@@ -1178,6 +1178,10 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
                   if k in listen and listen[k] not in (None, "", [], {})}
     new_listen["HttpsPorts"] = [443]
     new_listen["CertId"] = cert_identifier
+    # 必须显式给合法 TLS 配置：新接入域名详情里 TLSVersion 为空，不传会让 WAF 用无效默认值，
+    # 导致 ModifyDomain 报 InvalidTLS。tlsv1.2 + 套件 1（全部套件）兼容性最好。
+    new_listen["TLSVersion"] = "tlsv1.2"
+    new_listen["CipherSuite"] = 1
     redirect_in = detail.get("Redirect") or {}
     new_redirect = {k: redirect_in[k] for k in WAF_REDIRECT_FIELDS if k in redirect_in}
     # 优先用云端现有回源，其次用配置的 origin 源站，避免开 443 时冲掉回源
