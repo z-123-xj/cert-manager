@@ -14,17 +14,19 @@
 # certificates[] 字段速查：
 #   name            可选，证书标识 = CAS 证书名前缀；省略时取主域名
 #   dns             可选，默认 aliyun_cn；平台名 aliyun_cn / aliyun_intl / cloudflare
-#   dns_account     DNS-01 账号名：aliyun_* 平台下填对应分组里的账号名（如 cn1/intl1），
-#                   cloudflare 平台下填 cloudflare 段的账号名（如 cloudflare1）
+#   dns_account     可选，DNS-01 账号名：省略时按 dns 平台取该分组下第一个账号
+#                   （aliyun_cn->cn1 / aliyun_intl->intl1 / cloudflare->第一个）；
+#                   平台下有多个账号、需指定某个时才写（如 cn1/intl1/cloudflare1）
 #   domains         可选，真正签进证书的 SAN 列表；省略时由 dcdn_domains + waf_domains 去重推导
 #   deploy          可选，证书级默认部署平台（aliyun_cn / aliyun_intl），与 deploy_account 配对
 #   deploy_account  可选，证书级默认部署账号（该平台下的账号名）；单个域名可用同名键覆盖
 #   dcdn_domains    要绑定的加速域名：字符串简写，或 {domain, deploy, deploy_account} 覆盖平台/账号
 #   waf_origin      WAF 证书级源站（IP 或域名），供所有 waf_domains 共用
-#   waf_id          可选，证书级 WAF 实例 ID；留空则按 deploy 平台 + deploy_account 自动发现
-#                   （优先级：waf_id > .env 的平台+账号/账号/全局 WAF_INSTANCE_ID > 自动发现）
+#   waf_zone        WAF 地域：cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)；
+#                   每地域自动发现该账号下唯一实例，无需填实例 ID（证书级/域名级均可写）
+#   waf_id          可选高级覆盖：显式 WAF 实例 ID，填了就不再自动发现（多实例时才需要）
 #   waf_domains     WAF 防护域名：字符串列表即可；未接入的域名用 waf_origin 自动接入（HTTP 80 起步）
-#                   （个别域名源站/平台/账号不同时才展开 {domain, origin, deploy, deploy_account} 对象）
+#                   （个别域名源站/平台/账号/zone 不同时才展开 {domain, origin, deploy, deploy_account, waf_zone} 对象）
 #
 # 改完先跑：python3 certmgr.py --config config/certs.example.yaml --check
 # 旧格式（顶层 dcdn_domains + cert 引用）仍可自动识别，见文件末尾迁移说明。
@@ -92,17 +94,18 @@ certificates:
     deploy: aliyun_cn
     deploy_account: cn1
     domains: ["waf.example.net", "*.example.net"]   # waf 域名需在 SAN 内
-    waf_id:                                          # 留空则按 deploy 平台 + deploy_account 自动发现实例
+    waf_zone: cn                                     # cn=中国内地 / intl=非中国内地；自动发现该地域唯一实例
     waf_origin: ["1.2.3.4", "1.2.3.5"]              # 源站 IP 或回源域名，供所有 waf 域名共用
     waf_domains:
       - "waf.example.net"            # 已接入 WAF：仅替换证书
       - "new.example.net"            # 未接入：用 waf_origin 自动接入再开 443 绑证书
-    # 仅当某域名平台/账号/waf_id/源站与证书级不同时，才展开成对象：
+    # 仅当某域名平台/账号/zone/源站与证书级不同时，才展开成对象：
     #   - domain: "special.example.net"
     #     deploy: aliyun_intl        # 这个 WAF 域名改到国际站 intl1（证书级默认是 aliyun_cn/cn1）
     #     deploy_account: intl1
-    #     waf_id: "waf-intl-xxx"     # 该账号的 WAF 实例；留空则按这个 deploy 平台/账号自动发现
+    #     waf_zone: intl             # 该域名的 WAF 地域（cn/intl），各自自动发现实例
     #     origin: ["5.6.7.8"]
+    # 多实例需指定时才用 waf_id 显式写实例 ID（填了就不再自动发现）
 
   # 例4：同一张证书既有 DCDN 又有 WAF，且部署到不同账号。
   #      也可不写证书级 deploy/deploy_account，把 deploy 写在每个域名项上（更清晰）；
@@ -121,7 +124,7 @@ certificates:
         waf_origin: "47.84.116.133"  # 源站写在域名项也支持（等同 origin）
         deploy: aliyun_intl
         deploy_account: intl1
-        waf_id:                      # 留空 -> 按 aliyun_intl/intl1 自动发现该账号实例
+        waf_zone: intl               # 非中国内地实例 -> ap-southeast-1，自动发现该地域唯一实例
 
 # ---------------------------------------------------------------------------
 # 旧格式迁移对照（改完即可删除本段）

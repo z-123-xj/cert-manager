@@ -23,7 +23,6 @@ certificates:
   # ---------- 国际站 ----------
   - name: "ywjhsxl.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["ywjhsxl.com", "*.ywjhsxl.com"]
     dcdn_domains:
       - domain: "ywjhsxl.com"
@@ -31,7 +30,6 @@ certificates:
 
   - name: "wysjhck.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["wysjhck.com", "*.wysjhck.com"]
     dcdn_domains:
       - domain: "wysjhck.com"
@@ -39,7 +37,6 @@ certificates:
 
   - name: "wkdlcpw.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["wkdlcpw.com", "*.wkdlcpw.com"]
     dcdn_domains:
       - domain: "wkdlcpw.com"
@@ -47,7 +44,6 @@ certificates:
 
   - name: "vusdksl.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["vusdksl.com", "*.vusdksl.com"]
     dcdn_domains:
       - domain: "vusdksl.com"
@@ -55,7 +51,6 @@ certificates:
 
   - name: "vjesuiw.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["vjesuiw.com", "*.vjesuiw.com"]
     dcdn_domains:
       - domain: "vjesuiw.com"
@@ -63,7 +58,6 @@ certificates:
 
   - name: "pslwejw.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["pslwejw.com", "*.pslwejw.com"]
     dcdn_domains:
       - domain: "pslwejw.com"
@@ -71,7 +65,6 @@ certificates:
 
   - name: "oskwmsx.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["oskwmsx.com", "*.oskwmsx.com"]
     dcdn_domains:
       - domain: "oskwmsx.com"
@@ -79,7 +72,6 @@ certificates:
 
   - name: "jsapitwo.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["jsapitwo.com", "*.jsapitwo.com"]
     dcdn_domains:
       - domain: "jsapitwo.com"
@@ -87,7 +79,6 @@ certificates:
 
   - name: "dhenwxc.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["dhenwxc.com", "*.dhenwxc.com"]
     dcdn_domains:
       - domain: "dhenwxc.com"
@@ -95,7 +86,6 @@ certificates:
 
   - name: "hsphgames.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["hsphgames.com", "*.hsphgames.com"]
     dcdn_domains:
       - domain: "cdn.hsphgames.com"
@@ -106,7 +96,6 @@ certificates:
   # ---------- 国内站 ----------
   - name: "happyp.vip"
     dns: aliyun_cn
-    dns_account: cn1
     domains: ["happyp.vip", "*.happyp.vip"]
     dcdn_domains:
       - domain: "cdn.happyp.vip"
@@ -114,7 +103,6 @@ certificates:
 
   - name: "jssupergame.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["jssupergame.com", "*.jssupergame.com"]
     dcdn_domains:
       - domain: "cdn.jssupergame.com"
@@ -122,7 +110,6 @@ certificates:
 
   - name: "chatsjssupergame.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["chatsjssupergame.com", "*.chatsjssupergame.com"]
     dcdn_domains:
       - domain: "chatsjssupergame.com"
@@ -130,7 +117,6 @@ certificates:
 
   - name: "ngnbw.com"
     dns: cloudflare
-    dns_account: cloudflare1
     domains: ["ngnbw.com", "*.ngnbw.com"]
     dcdn_domains:
       - domain: "cdn.ngnbw.com"
@@ -138,7 +124,6 @@ certificates:
 
   - name: "cdnfirstpro.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["cdnfirstpro.com", "*.cdnfirstpro.com"]
     dcdn_domains:
       - domain: "cdnfirstpro.com"
@@ -146,7 +131,6 @@ certificates:
 
   - name: "yeslsbg.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["yeslsbg.com", "*.yeslsbg.com"]
     dcdn_domains:
       - domain: "cdn.yeslsbg.com"
@@ -154,7 +138,6 @@ certificates:
 
   - name: "protwocdn.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["protwocdn.com", "*.protwocdn.com"]
     dcdn_domains:
       - domain: "protwocdn.com"
@@ -162,7 +145,6 @@ certificates:
 
   - name: "lkhsreq.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["lkhsreq.com", "*.lkhsreq.com"]
     dcdn_domains:
       - domain: "cdn.lkhsreq.com"
@@ -170,7 +152,6 @@ certificates:
 
   - name: "bgwjsq.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["bgwjsq.com", "*.bgwjsq.com"]
     dcdn_domains:
       - domain: "cdn.bgwjsq.com"
@@ -178,7 +159,6 @@ certificates:
 
   - name: "ponegs.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["ponegs.com", "*.ponegs.com"]
     dcdn_domains:
       - domain: "cres.ponegs.com"
@@ -186,7 +166,6 @@ certificates:
 
   - name: "bgphw.vip"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["bgphw.vip", "*.bgphw.vip"]
     dcdn_domains:
       - domain: "cres.bgphw.vip"
@@ -194,7 +173,6 @@ certificates:
 
   - name: "octbwp.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["octbwp.com", "*.octbwp.com"]
     dcdn_domains:
       - domain: "cres.octbwp.com"
@@ -202,7 +180,6 @@ certificates:
 
   - name: "octhsp.com"
     dns: aliyun_intl
-    dns_account: intl1
     domains: ["octhsp.com", "*.octhsp.com"]
     dcdn_domains:
       - domain: "cres.octhsp.com"
@@ -213,21 +190,19 @@ certificates:
   # 111wuw.bet 已在 WAF 接入：仅替换证书为 acme_waf_ 前缀那份，现有回源不动
   - name: "111wuw.bet"
     dns: cloudflare
-    dns_account: cloudflare1
     domains: ["111wuw.bet", "*.111wuw.bet"]
     waf_domains:
       - domain: "111wuw.bet"
         deploy: aliyun_cn
         waf_origin: "47.84.116.133"
-        waf_id:                      # 留空则按 deploy 平台/账号自动发现实例
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
 
   # 222wuw.bet 未接入：会用 waf_origin 自动 CreateDomain（HTTP 80 起步）再开 443 绑证书
   - name: "222wuw.bet"
     dns: cloudflare
-    dns_account: cloudflare1
     domains: ["222wuw.bet", "*.222wuw.bet"]
     waf_domains:
       - domain: "222wuw.bet"
         deploy: aliyun_cn
         waf_origin: "47.84.116.133"
-        waf_id:                      # 留空则按 deploy 平台/账号自动发现实例
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)

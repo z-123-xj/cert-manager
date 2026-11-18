@@ -88,6 +88,8 @@ cloudflare:
 
 服务器 crontab 内联的同名环境变量优先级高于 `.env`。国际站账号 `region: ap-southeast-1` 必须写在 yaml，否则默认 `cn-hangzhou` 会调错。
 
+**WAF 的 region 与账号 yaml 里的 region 是两回事**（账号 region 给 DCDN/CAS 用，WAF region 给 WAF OpenAPI 用）。用证书的 `waf_zone` 指定即可：`cn` → `cn-hangzhou`（中国内地实例）、`intl` → `ap-southeast-1`（非中国内地实例，含港澳台/海外）；脚本据此调 `DescribeInstance` 自动发现该地域唯一实例。若既没写 `waf_zone`、`.env` 也没配 `WAF_REGION`，脚本默认沿用账号 yaml 的 region——此时非中国内地实例会在 `cn-hangzhou` 查到 0 个、WAF 部署被跳过。故非中国内地 WAF 务必写 `waf_zone: intl`（或用 `.env` 的 `<平台>_<账号>_WAF_REGION=ap-southeast-1` 兜底）。
+
 配置以**证书为单位**：每张证书自带 `dcdn_domains`（DCDN）和/或 `waf_domains`（WAF），不需要顶层 `dcdn_domains`，也不需要 `cert` 交叉引用。
 
 ```yaml
@@ -105,7 +107,7 @@ certificates:
         deploy: aliyun_cn
         deploy_account: cn1
     waf_origin: ["1.2.3.4"]         # 可选：证书级源站，供所有 waf_domains 共用
-    waf_id:                         # 可选：证书级 WAF 实例 ID；留空则按 deploy 平台 + deploy_account 自动发现
+    waf_zone: cn                    # cn=中国内地 / intl=非中国内地；自动发现该地域唯一实例
     waf_domains:                    # 可选：WAF 3.0 防护域名（字符串列表即可）
       - "waf.example.org"          # 已接入 WAF：仅替换证书
       - "new.example.org"          # 未接入：用 waf_origin 自动接入（HTTP 80 起步）
@@ -130,19 +132,20 @@ certificates:
         waf_origin: "47.84.116.133"  # 源站也可写在域名项（等同 origin）
         deploy: aliyun_intl
         deploy_account: intl1
-        waf_id:                      # 留空 -> 按 aliyun_intl/intl1 自动发现实例
+        waf_zone: intl               # 非中国内地实例 -> ap-southeast-1，自动发现唯一实例
   ```
 
-  证书级 `waf_origin` / `waf_id` 仍可作为所有 WAF 域名的默认；域名项写了就以域名项为准。
+  证书级 `waf_origin` / `waf_zone` 仍可作为所有 WAF 域名的默认；域名项写了就以域名项为准。
 - **`waf_domains`**：要绑定的 WAF 3.0 防护域名，写法同 `dcdn_domains`，额外支持 `origin`（源站 IP/域名，字符串或列表；旧名 `backends` 仍兼容）。**WAF 与 DCDN 用不同的 CAS 证书名前缀**（`acme_waf_` vs `acme_`），避免先部署 WAF 占用名字导致 DCDN 报 `CertNameAlreadyExists`。
-- **`waf_id`（可选）**：WAF 实例 ID。证书级写一次作默认；若证书的 WAF 域名分属不同账号，可在 `waf_domains` 的域名对象里单独写 `waf_id` 覆盖。留空时脚本按该域名的 `deploy` 平台 + `deploy_account` 调 `DescribeInstance` 自动发现（单实例自动用、多实例报错要求显式填）。优先级：**域名 `waf_id` > 证书 `waf_id` > `.env` 的 `<平台>_<账号>_WAF_INSTANCE_ID` / `<账号>_WAF_INSTANCE_ID` / 全局 `WAF_INSTANCE_ID` > 自动发现**。写在证书上后，`.env` 的 `CN1_WAF_INSTANCE_ID` 等就只是**兜底**（证书没写 waf_id 时才用），二者不冲突。
+- **`waf_zone`（推荐）**：WAF 实例地域，`cn` = 中国内地（OpenAPI region `cn-hangzhou`）、`intl` = 非中国内地（`ap-southeast-1`）。阿里云一个账号在同一地域只有一个 WAF 实例，所以脚本按 `waf_zone` 解析出 region 后调 `DescribeInstance` **自动发现该地域唯一实例**，无需填实例 ID。证书级写一次作默认，域名项可覆盖；同账号的 `cn`/`intl` 是两个不同实例，会分别发现、互不串用。发现结果只在**本次脚本执行内**缓存（按 `平台.账号.地域`），同一账号同一地域只查一次；不跨进程持久化，实例更换后下次执行自动重新发现。
+- **`waf_id`（可选高级覆盖）**：显式 WAF 实例 ID，填了就不再自动发现——仅当某地域查到多个实例、想指定某一个时才需要。优先级：**域名/证书 `waf_id` > `.env` 的 `<平台>_<账号>_WAF_INSTANCE_ID` / `<账号>_WAF_INSTANCE_ID` / 全局 `WAF_INSTANCE_ID` > 按 `waf_zone` 自动发现**。`.env` 的 `*_WAF_INSTANCE_ID` 只是兜底，证书配了 `waf_zone` 自动发现即可，不必填。
 - **`waf_origin`（可选）**：证书级默认源站，域名没写 `origin` 时统一用它，省得每个 WAF 域名重复写。
   脚本以**接入域名为准**逐个判定（DescribeDomains 按域名过滤）：
   - 已接入且 443 已开、证书一致 → 跳过；证书不同 → `ModifyDomainCert` 只切证书引用；
   - 已接入但 443 未开 → `ModifyDomain` 开 443 并绑证书（带回现有回源配置，不会冲掉）；
   - 确实未接入且有源站（`origin`/`waf_origin`）→ 自动 `CreateDomain` 接入（HTTP 80 起步）再开 443；无源站则跳过并告警；
   - 接入状态查询失败 → 本次跳过（不自动接入，避免误判重复创建）。
-- **`dns` / `dns_account`**：`dns` 是平台名 —— `aliyun_cn` / `aliyun_intl` 用对应 `aliyun_*` 分组账号的 AK 去阿里云 DNS 加 TXT（acme.sh `dns_ali`），`cloudflare` 用 `cloudflare` 段下账号的 API Token（`dns_cf`）。`dns_account` 是平台下的账号名（如 `cn1`/`intl1`/`cloudflare1`）；省略时取对应段的第一个账号。旧写法 `dns: aliyun` 仍视为阿里云 DNS。`cloudflare` 单账号旧写法也会自动归一化。
+- **`dns` / `dns_account`**：`dns` 是平台名 —— `aliyun_cn` / `aliyun_intl` 用对应 `aliyun_*` 分组账号的 AK 去阿里云 DNS 加 TXT（acme.sh `dns_ali`），`cloudflare` 用 `cloudflare` 段下账号的 API Token（`dns_cf`）。`dns_account` 是平台下的账号名（如 `cn1`/`intl1`/`cloudflare1`），**可省略**：省略时按 `dns` 平台取该分组下的第一个账号（`aliyun_cn`→`cn1`、`aliyun_intl`→`intl1`、`cloudflare`→第一个）；只有平台下有多个账号、想指定某个时才写。旧写法 `dns: aliyun` 仍视为阿里云 DNS。`cloudflare` 单账号旧写法也会自动归一化。
 
 DNS 在 Cloudflare、DCDN/WAF 在阿里云互不影响的用法仍然支持。每个证书只签发一次，按「证书 + 部署平台 + 部署账号」分组，每组只上传一次。
 
