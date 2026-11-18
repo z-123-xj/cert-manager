@@ -921,6 +921,21 @@ def waf_api(client, action, params, region):
     return json.loads(client.do_action_with_exception(req))
 
 
+def waf_api_retry_processing(client, action, params, region, tries=12, interval=10):
+    """WAF 接入域名/改配置后资源异步下发，期间改证书/开 443 会报 ResourceProcessing。
+    该错误带退避重试（最多 tries×interval 秒）；其它错误原样抛出交调用方处理。"""
+    for i in range(tries):
+        try:
+            return waf_api(client, action, params, region)
+        except Exception as e:
+            if "ResourceProcessing" not in str(e) or i == tries - 1:
+                raise
+            if i == 0:
+                log(f"[INFO] WAF {action} 资源处理中，等待异步配置下发后重试"
+                    f"（最多 {tries} 次 × {interval}s）…")
+            time.sleep(interval)
+
+
 def cert_dns_cfg(cert, accounts, cf):
     """返回证书自身的 DNS 验证凭证 (kind, platform, acc_name, cfg)，供 WAF 归属权验证写 TXT 用。
     与签发用的 DNS 账号一致：DNS 在哪就到哪加 TXT。
@@ -1166,7 +1181,7 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
     backends = waf_backends(redirect_in) or item.get("origin") or []
     new_redirect["Backends"] = backends
     new_redirect.setdefault("Loadbalance", "iphash")
-    waf_api(client, "ModifyDomain", {
+    waf_api_retry_processing(client, "ModifyDomain", {
         "InstanceId": iid, "Domain": domain, "AccessType": "share",
         "Listen": new_listen, "Redirect": new_redirect,
     }, region)
@@ -1340,7 +1355,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             if has_443:
                 try:
                     # 只换证书引用，不碰端口/转发（ModifyDomainCert 无 HttpsPorts 参数）
-                    waf_api(client, "ModifyDomainCert", {
+                    waf_api_retry_processing(client, "ModifyDomainCert", {
                         "InstanceId": iid, "Domain": domain, "CertId": cert_identifier,
                     }, waf_region)
                     log(f"[BIND] WAF {domain} 换证书 -> {waf_label}（原 CertId={cur_cert}）")
