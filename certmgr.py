@@ -36,6 +36,8 @@ import subprocess
 import argparse
 import yaml
 import shutil
+import urllib.request
+import urllib.parse
 
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.request import CommonRequest
@@ -750,6 +752,140 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     delete_old_certs(client, f"acme_{safe}_", keep=cert_id)
 
 
+# --------------------- DNS TXT 记录写入（WAF 归属权验证用） ---------------------
+def dns_txt_upsert(domain, rr, value, dns_cfg):
+    """在域名 DNS 上写入一条 TXT 记录（存在则改，不存在则加），用于 WAF 归属权验证。
+    domain: 被验证域名；rr: WAF 返回的主机记录(可能已含主域)；value: 验证值。
+    dns_cfg: 证书的 DNS 平台凭证 —— (kind, platform, acc_name, account/cf 配置字典)。
+    返回 True/False。"""
+    kind, platform, _acc_name, cfg = dns_cfg
+    if not isinstance(cfg, dict):
+        return False
+    # 拼完整记录名：WAF 的 RR 可能是 'verification' 也可能是 'verification.example.com'
+    name = rr if (rr == domain or rr.endswith("." + domain)) else f"{rr}.{domain}"
+    if kind == "cloudflare":
+        return _cf_txt_upsert(name, value, cfg)
+    if kind == "aliyun":
+        return _ali_txt_upsert(domain, name, value, cfg, _acc_name, platform)
+    log(f"[WARN] 归属权验证不支持的 DNS 平台 {kind}")
+    return False
+
+
+def _cf_api(method, path, token, body=None, params=None):
+    """调 Cloudflare REST API，返回解析后的 JSON dict；失败抛异常。"""
+    url = "https://api.cloudflare.com/client/v4" + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _cf_txt_upsert(name, value, cfg):
+    token = cfg.get("api_token")
+    if not token:
+        log("[WARN] Cloudflare 归属权验证缺少 api_token")
+        return False
+    zone_name = name.split(".", 1)[1] if "." in name else name
+    # 逐级向上找 zone（验证记录可能在子域、二级域或主域下）：
+    # 222wuw.bet -> wuw.bet -> bet，每次去掉最左标签
+    zone = None
+    candidate = zone_name
+    while candidate:
+        resp = _cf_api("GET", "/zones", token, params={"name": candidate, "per_page": 1})
+        if resp.get("success") and resp.get("result"):
+            zone = resp["result"][0]
+            break
+        candidate = candidate.split(".", 1)[1] if "." in candidate else ""
+    if not zone:
+        log(f"[WARN] Cloudflare 找不到 {name} 对应的 zone，无法自动加验证 TXT")
+        return False
+    zid = zone["id"]
+    resp = _cf_api("GET", f"/zones/{zid}/dns_records", token,
+                   params={"type": "TXT", "name": name, "per_page": 100})
+    records = resp.get("result") or []
+    hit = next((r for r in records if (r.get("content") or "").strip('"') == value), None)
+    if hit:
+        log(f"[INFO] Cloudflare 验证 TXT {name} 已存在且值一致，跳过")
+        return True
+    if records:
+        rid = records[0]["id"]
+        _cf_api("PATCH", f"/zones/{zid}/dns_records/{rid}", token,
+                body={"type": "TXT", "name": name, "content": value, "ttl": 1})
+        log(f"[INFO] Cloudflare 验证 TXT {name} 已存在，更新为最新值")
+    else:
+        _cf_api("POST", f"/zones/{zid}/dns_records", token,
+                body={"type": "TXT", "name": name, "content": value, "ttl": 1})
+        log(f"[INFO] Cloudflare 验证 TXT {name} 已添加")
+    return True
+
+
+def _ali_dns_endpoint(platform, cfg):
+    """按 DNS 平台选阿里云 DNS 的 endpoint 与 region。
+    国内站(aliyun_cn): alidns.aliyuncs.com / cn-hangzhou；
+    国际站(aliyun_intl): alidns.ap-southeast-1.aliyuncs.com / ap-southeast-1。
+    两站账号体系隔离，AK 只能调对应站点；账号 cfg 里的 endpoint/region 可覆盖。"""
+    plat = (platform or "").lower()
+    if plat == "aliyun_intl":
+        endpoint, region = "alidns.ap-southeast-1.aliyuncs.com", "ap-southeast-1"
+    else:  # aliyun_cn / 兼容旧 aliyun
+        endpoint, region = "alidns.aliyuncs.com", "cn-hangzhou"
+    return cfg.get("dns_endpoint") or cfg.get("endpoint") or endpoint, cfg.get("region") or region
+
+
+def _ali_dns_call(client, endpoint, action, params):
+    """发一个阿里云 DNS OpenAPI 请求，返回解析后的 dict。"""
+    req = CommonRequest()
+    req.set_accept_format("json")
+    req.set_domain(endpoint)
+    req.set_version("2015-01-09")
+    req.set_method("POST")
+    req.set_action_name(action)
+    for k, v in (params or {}).items():
+        if v is not None:
+            req.add_query_param(k, v)
+    return json.loads(client.do_action_with_exception(req))
+
+
+def _ali_txt_upsert(domain, name, value, cfg, acc_name, platform):
+    """用阿里云 DNS OpenAPI 加/改 TXT（国内站/国际站按平台自动选 endpoint）。"""
+    k, s = cfg.get("access_key"), cfg.get("access_secret")
+    if not (k and s):
+        log(f"[WARN] DNS 账号 {acc_name} 缺 access_key/access_secret，无法自动加验证 TXT")
+        return False
+    endpoint, region = _ali_dns_endpoint(platform, cfg)
+    try:
+        client = AcsClient(k, s, region)
+        # 取相对 RR
+        rr = name[:-len(domain) - 1] if name.endswith("." + domain) else name
+        recs_resp = _ali_dns_call(client, endpoint, "DescribeDomainRecords", {
+            "DomainName": domain, "RRKeyWord": rr, "Type": "TXT", "PageSize": 100,
+        })
+        records = ((recs_resp.get("DomainRecords") or {}).get("Record") or [])
+        # RRKeyWord 是模糊匹配，必须精确过滤 RR，避免误改同前缀的其它记录
+        records = [r for r in records if (r.get("RR") or "") == rr]
+        hit = next((r for r in records if (r.get("Value") or "").strip('"') == value), None)
+        if hit:
+            log(f"[INFO] 阿里云 DNS 验证 TXT {name} 已存在且值一致，跳过（{endpoint}）")
+            return True
+        if records:
+            _ali_dns_call(client, endpoint, "UpdateDomainRecord", {
+                "RecordId": records[0]["RecordId"], "RR": rr, "Type": "TXT", "Value": value,
+            })
+            log(f"[INFO] 阿里云 DNS 验证 TXT {name} 已存在，更新为最新值（{endpoint}）")
+        else:
+            _ali_dns_call(client, endpoint, "AddDomainRecord", {
+                "DomainName": domain, "RR": rr, "Type": "TXT", "Value": value,
+            })
+            log(f"[INFO] 阿里云 DNS 验证 TXT {name} 已添加（{endpoint}）")
+        return True
+    except Exception as e:
+        log(f"[WARN] 阿里云 DNS 写入验证 TXT {name} 失败（{endpoint}）: {e}")
+        return False
+
+
 # ----------------------------- WAF 3.0 部署 -----------------------------
 # WAF 3.0 用 RPC 风格 OpenAPI（版本 2021-10-01，endpoint wafopenapi.<region>.aliyuncs.com）。
 # 与 DCDN 不同：证书以「引用 CertId」方式绑定，ModifyDomainCert 只换证书不动端口/转发；
@@ -783,6 +919,75 @@ def waf_api(client, action, params, region):
             v = json.dumps(v, ensure_ascii=False)
         req.add_query_param(k, v)
     return json.loads(client.do_action_with_exception(req))
+
+
+def cert_dns_cfg(cert, accounts, cf):
+    """返回证书自身的 DNS 验证凭证 (kind, platform, acc_name, cfg)，供 WAF 归属权验证写 TXT 用。
+    与签发用的 DNS 账号一致：DNS 在哪就到哪加 TXT。
+    platform 保留原始平台名（aliyun_cn/aliyun_intl/cloudflare），用于区分阿里云国内站/国际站 endpoint。"""
+    dns = cert.get("dns", "aliyun_cn")
+    acc_name = cert.get("dns_account")
+    kind = dns_kind(dns)
+    if kind == "aliyun":
+        return (kind, dns, acc_name, accounts.get(acc_name))
+    if kind == "cloudflare":
+        cfg = None
+        if isinstance(cf, dict):
+            if acc_name and isinstance(cf.get(acc_name), dict):
+                cfg = cf[acc_name]
+            elif not acc_name and "api_token" in cf:
+                cfg = cf
+        return (kind, dns, acc_name, cfg)
+    return (kind, dns, acc_name, None)
+
+
+def waf_verify_domain_owner(client, region, iid, domain, dns_cfg, tries=12, interval=10):
+    """自动完成 WAF 域名归属权验证：DescribeVerifyContent 取 TXT 内容 → 写入 DNS →
+    VerifyDomainOwner 轮询校验。dns_cfg=(kind, platform, acc_name, cfg) 为证书自身 DNS 凭证。返回 True/False。"""
+    # 1) 取验证内容（可能已验证通过）
+    try:
+        resp = waf_api(client, "DescribeVerifyContent", {
+            "InstanceId": iid, "DomainName": domain, "AccessOrigin": "share",
+        }, region)
+    except Exception as e:
+        log(f"[WARN] WAF {domain} 查询归属权验证内容失败: {e}")
+        return False
+    if resp.get("VerifyResult") is True:
+        log(f"[INFO] WAF {domain} 归属权已验证，跳过")
+        return True
+    dns = resp.get("DnsContent") or {}
+    rr, value = dns.get("RR"), dns.get("Value")
+    if not (rr and value):
+        log(f"[WARN] WAF {domain} 未返回 TXT 验证内容（可能该接入方式无需验证或需文件验证），跳过自动验证")
+        return False
+    # 2) 写入 DNS TXT（用证书自身的 DNS 凭证）
+    if not dns_cfg or not dns_cfg[2]:
+        log(f"[WARN] WAF {domain} 需要 TXT 归属权验证，但证书无可用 DNS 凭证，跳过")
+        return False
+    if not dns_txt_upsert(domain, rr, value, dns_cfg):
+        log(f"[WARN] WAF {domain} 写入验证 TXT 失败，跳过自动验证")
+        return False
+    # 3) 轮询校验（DNS 生效需时间）
+    log(f"[INFO] WAF {domain} 已写入归属权验证 TXT，等待生效并校验（最多 {tries * interval}s）…")
+    time.sleep(5)
+    for i in range(tries):
+        try:
+            vresp = waf_api(client, "VerifyDomainOwner", {
+                "InstanceId": iid, "DomainName": domain, "VerifyType": "dnsCheck",
+            }, region)
+            result = vresp.get("VerifyResult") or {}
+            if result.get("Result") is True:
+                log(f"[INFO] WAF {domain} 归属权验证通过")
+                return True
+            if i == tries - 1:
+                log(f"[WARN] WAF {domain} 归属权验证未通过（{result.get('FailCode')}），"
+                    f"请确认 TXT 是否生效；TXT 修改最长需一个 TTL（约 10 分钟），可稍后重跑")
+        except Exception as e:
+            if i == tries - 1:
+                log(f"[WARN] WAF {domain} 归属权校验调用失败: {e}")
+        if i < tries - 1:
+            time.sleep(interval)
+    return False
 
 
 def _waf_instance_items(resp):
@@ -936,12 +1141,14 @@ def waf_cert_number(value):
 
 
 def waf_backends(redirect):
-    """兼容详情里 Backends/Backeds 的数组形态（元素可能是字符串或 {Backend: ...}）。"""
+    """兼容详情里 Backends/Backeds 的数组形态（元素可能是字符串或 {Backend: ...}），并去重保序。"""
     raw = (redirect or {}).get("Backends") or (redirect or {}).get("Backeds") or []
     out = []
+    seen = set()
     for b in raw if isinstance(raw, list) else []:
         v = b.get("Backend") if isinstance(b, dict) else b
-        if v:
+        if v and v not in seen:
+            seen.add(v)
             out.append(v)
     return out
 
@@ -1009,11 +1216,13 @@ def waf_wait_cert_visible(client, region, iid, cert_number, tries=6, interval=10
     return str(cert_number)
 
 
-def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_id=None, region=None):
+def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_id=None, region=None,
+                     accounts=None, cf=None):
     """WAF 3.0 部署：证书换名上传到 CAS（acme_waf_ 前缀，避开 DCDN 同名冲突），
     逐域名查 443/当前证书做幂等；确实未接入且配了源站（origin/waf_origin）则自动以 HTTP 接入。
     platform=部署平台（如 aliyun_cn），与 acc_name 配对决定用哪个账号；region=WAF 地域
-    （由 waf_zone 解析），同账号 cn/intl 各查各的实例；waf_id=显式实例 ID（可选），留空自动发现。"""
+    （由 waf_zone 解析），同账号 cn/intl 各查各的实例；waf_id=显式实例 ID（可选），留空自动发现。
+    accounts/cf=全部 DNS 凭证，新域名接入报归属权未验证时用证书自身的 DNS 账号自动加 TXT 验证。"""
     waf_region = region or waf_account_env(acc_name, "REGION", platform) or account.get("region") or "cn-hangzhou"
     client = make_client(account)
     iid = get_waf_instance_id(client, waf_region, acc_name, platform, configured_id=waf_id)
@@ -1051,20 +1260,38 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                 log(f"[WARN] WAF {domain} 未接入且未配 origin 源站，无法自动接入，跳过"
                     f"（请在 waf_domains 写 origin 或证书级 waf_origin，或先在控制台接入）")
                 continue
-            try:
-                waf_api(client, "CreateDomain", {
-                    "InstanceId": iid, "Domain": domain, "AccessType": "share",
-                    "Listen": {"HttpPorts": [80]},
-                    "Redirect": {"Backends": origin, "Loadbalance": "iphash"},
-                }, waf_region)
-                log(f"[JOIN] WAF 接入域名 {domain}（HTTP 80，源站 {origin}）")
-                time.sleep(3)  # 等接入生效再查详情
-            except Exception as e:
-                if "ResourceExsit" in str(e) or "ResourceExist" in str(e):
-                    log(f"[INFO] WAF {domain} 已存在接入记录（ResourceExsit），按已接入继续")
-                else:
+            create_params = {
+                "InstanceId": iid, "Domain": domain, "AccessType": "share",
+                "Listen": {"HttpPorts": [80]},
+                "Redirect": {"Backends": origin, "Loadbalance": "iphash"},
+            }
+            joined = False
+            for attempt in (1, 2):
+                try:
+                    waf_api(client, "CreateDomain", create_params, waf_region)
+                    log(f"[JOIN] WAF 接入域名 {domain}（HTTP 80，源站 {origin}）")
+                    joined = True
+                    break
+                except Exception as e:
+                    msg = str(e)
+                    if "ResourceExsit" in msg or "ResourceExist" in msg:
+                        log(f"[INFO] WAF {domain} 已存在接入记录（ResourceExsit），按已接入继续")
+                        joined = True
+                        break
+                    if "DomainOwnerNotVerify" in msg and attempt == 1:
+                        # 归属权未验证：用证书自身的 DNS 凭证加 TXT 完成验证，再重试接入
+                        log(f"[INFO] WAF {domain} 归属权未验证，尝试用证书 DNS 账号自动完成 TXT 验证")
+                        dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
+                        if waf_verify_domain_owner(client, waf_region, iid, domain, dns_cfg):
+                            continue  # 验证通过，重试 CreateDomain
+                        log(f"[WARN] WAF {domain} 归属权自动验证未成功，本次接入跳过"
+                            f"（可在 WAF 控制台手动完成归属权验证后重跑）")
+                        break
                     log(f"[ERROR] WAF 接入域名 {domain} 失败: {e}")
-                    continue
+                    break
+            if not joined:
+                continue
+            time.sleep(3)  # 等接入生效再查详情
         targets.append(item)
     if not targets:
         return
@@ -1218,7 +1445,8 @@ def process(cfg, force=False):
         log(f"[INFO] 检测到 {len(waf_groups)} 个 WAF 部署组，开始处理")
     for g in waf_groups.values():
         deploy_waf_group(g["cert"], g["account"], g["acc_name"], g["domains"], force,
-                         platform=g.get("platform"), waf_id=g.get("waf_id"), region=g.get("region"))
+                         platform=g.get("platform"), waf_id=g.get("waf_id"), region=g.get("region"),
+                         accounts=accounts, cf=cf)
 
 
 def main():

@@ -43,8 +43,13 @@ cert-manager/
    - **SSL 证书服务（CAS）**：上传/查询/删除证书
    - **DCDN**：`SetDcdnDomainSSLCertificate`（绑定证书到加速域名）
    - **WAF 3.0（如启用）**：`DescribeInstance`、`DescribeDomains`、`DescribeDomainDetail`、
-     `DescribeCerts`、`CreateDomain`（未接入时）、`ModifyDomain`（开 443）、`ModifyDomainCert`（换证书）
-   - **DNS**：`dns_ali` 需要的 AliyunDNSFullAccess（或最小权限）
+     `DescribeCerts`、`CreateDomain`（未接入时）、`ModifyDomain`（开 443）、`ModifyDomainCert`（换证书）；
+     自动归属权验证还需 `DescribeVerifyContent`、`VerifyDomainOwner`
+   - **DNS**：`dns_ali` 需要的 AliyunDNSFullAccess（或最小权限）。新域名自动归属权验证会往域名的 DNS 写一条 TXT：
+     Cloudflare 用证书的 `api_token`（需 Zone:DNS Edit 权限），阿里云 DNS 用对应账号 AK/SK（需 AddDomainRecord / UpdateDomainRecord / DescribeDomainRecords）。
+     **阿里云国内站 / 国际站按证书的 `dns` 自动选 endpoint**：`aliyun_cn` → `alidns.aliyuncs.com`（cn-hangzhou）、
+     `aliyun_intl` → `alidns.ap-southeast-1.aliyuncs.com`（ap-southeast-1），两站账号体系隔离不可混用；
+     如需覆盖可在该账号配置里写 `dns_endpoint` / `region`（也兼容 `endpoint` 字段）
 
 ## 配置
 
@@ -136,7 +141,7 @@ certificates:
   ```
 
   证书级 `waf_origin` / `waf_zone` 仍可作为所有 WAF 域名的默认；域名项写了就以域名项为准。
-- **`waf_domains`**：要绑定的 WAF 3.0 防护域名，写法同 `dcdn_domains`，额外支持 `origin`（源站 IP/域名，字符串或列表；旧名 `backends` 仍兼容）。**WAF 与 DCDN 用不同的 CAS 证书名前缀**（`acme_waf_` vs `acme_`），避免先部署 WAF 占用名字导致 DCDN 报 `CertNameAlreadyExists`。
+- **`waf_domains`**：要绑定的 WAF 3.0 防护域名，写法同 `dcdn_domains`，额外支持 `origin`（源站 IP/域名，字符串或列表；旧名 `backends` 仍兼容）。**WAF 与 DCDN 用不同的 CAS 证书名前缀**（`acme_waf_` vs `acme_`），避免先部署 WAF 占用名字导致 DCDN 报 `CertNameAlreadyExists`。新域名接入若报归属权未验证，脚本会用该证书的 `dns`/`dns_account` 凭证自动加 TXT 完成验证（详见「运行」节的首次接入说明）。
 - **`waf_zone`（推荐）**：WAF 实例地域，`cn` = 中国内地（OpenAPI region `cn-hangzhou`）、`intl` = 非中国内地（`ap-southeast-1`）。阿里云一个账号在同一地域只有一个 WAF 实例，所以脚本按 `waf_zone` 解析出 region 后调 `DescribeInstance` **自动发现该地域唯一实例**，无需填实例 ID。证书级写一次作默认，域名项可覆盖；同账号的 `cn`/`intl` 是两个不同实例，会分别发现、互不串用。发现结果只在**本次脚本执行内**缓存（按 `平台.账号.地域`），同一账号同一地域只查一次；不跨进程持久化，实例更换后下次执行自动重新发现。
 - **`waf_id`（可选高级覆盖）**：显式 WAF 实例 ID，填了就不再自动发现——仅当某地域查到多个实例、想指定某一个时才需要。优先级：**域名/证书 `waf_id` > `.env` 的 `<平台>_<账号>_WAF_INSTANCE_ID` / `<账号>_WAF_INSTANCE_ID` / 全局 `WAF_INSTANCE_ID` > 按 `waf_zone` 自动发现**。`.env` 的 `*_WAF_INSTANCE_ID` 只是兜底，证书配了 `waf_zone` 自动发现即可，不必填。
 - **`waf_origin`（可选）**：证书级默认源站，域名没写 `origin` 时统一用它，省得每个 WAF 域名重复写。
@@ -195,8 +200,9 @@ crontab -e
 # 17 3 * * * CN1_AK=xxx CN1_SK=xxx CF_TOKEN_1=xxx CN1_WAF_INSTANCE_ID=waf_xxx LE_WORKING_DIR=/root/.acme.sh cd /opt/cert-manager && /opt/cert-manager/venv/bin/python3 certmgr.py --config /opt/cert-manager/config/certs.yaml >> /opt/cert-manager/logs/certmgr.log 2>&1
 ```
 
-WAF 首次接入注意：`CreateDomain` 要求域名已完成**域名归属权验证**与（国内站）**ICP 备案**，
-脚本不代办这两步，请先在控制台完成；否则接入会失败并在日志给出错误码。
+WAF 首次接入注意：`CreateDomain` 要求域名已完成**域名归属权验证**与（国内站）**ICP 备案**。
+- **归属权验证（DNS TXT）**：脚本自动代办。`CreateDomain` 报 `DomainOwnerNotVerify` 时，脚本用该证书自身的 DNS 账号（`dns` / `dns_account`，与签发同一套凭证）调 `DescribeVerifyContent` 取 TXT 内容，写入 DNS（存在则更新、不存在则新增），再调 `VerifyDomainOwner` 轮询校验，通过后自动重试接入。TXT 首次配置实时生效、修改最长约一个 TTL（10 分钟），若本次未通过可稍后重跑。若证书 DNS 凭证缺失或无相应权限，会跳过并在日志告警。
+- **ICP 备案**：脚本不代办，国内站域名需先在阿里云控制台完成备案，否则接入失败。
 
 ## 验证
 
