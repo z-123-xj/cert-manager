@@ -891,11 +891,12 @@ def _ali_txt_upsert(domain, name, value, cfg, acc_name, platform):
 # 与 DCDN 不同：证书以「引用 CertId」方式绑定，ModifyDomainCert 只换证书不动端口/转发；
 # 只有首次开 443 才需要 ModifyDomain（必须带 Listen + Redirect）。
 WAF_API_VERSION = "2021-10-01"
-WAF_LISTEN_FIELDS = ("HttpPorts", "HttpsPorts", "Http2Enabled", "CertId", "SM2Enabled",
-                     "SM2CertId", "SM2AccessOnly", "TLSVersion", "EnableTLSv3", "CipherSuite",
-                     "CustomCiphers", "FocusHttps", "XffHeaderMode", "XffHeaders", "IPv6Enabled",
-                     "ProtectionResource", "ExclusiveIp", "HstsIncludeSubDomain", "HstsPreload",
-                     "HstsMaxAge")
+# 开 443 时从 DescribeDomainDetail 透传的 Listen 字段。
+# 刻意不含 TLSVersion/CipherSuite/EnableTLSv3/CustomCiphers/SM2* 等 TLS/国密配置字段：
+# 刚以 HTTP 接入的域名这些值是空串或无效值，原样透传会让 ModifyDomain 报 InvalidTLS；
+# 不传即让 WAF 用默认 TLS 配置，CertId/HttpsPorts 在下方显式设置。
+WAF_LISTEN_FIELDS = ("HttpPorts", "Http2Enabled", "XffHeaderMode", "XffHeaders",
+                     "IPv6Enabled", "ProtectionResource", "ExclusiveIp")
 WAF_REDIRECT_FIELDS = ("Backends", "Loadbalance", "FocusHttpBackend", "SniEnabled", "SniHost",
                        "RequestHeaders", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
                        "CnameEnabled", "RoutingRules", "Keepalive", "Retry", "KeepaliveRequests",
@@ -1172,7 +1173,9 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
     """用 ModifyDomain 显式开启 443 并绑定证书：必须带完整 Listen + Redirect，
     并保留云端现有回源，否则会冲掉已配置的转发规则。返回实际使用的源站列表。"""
     listen = detail.get("Listen") or {}
-    new_listen = {k: listen[k] for k in WAF_LISTEN_FIELDS if k in listen}
+    # 只透传有实际值的常规字段，跳过空串/None/空容器（空值同样会触发 WAF 参数校验）
+    new_listen = {k: listen[k] for k in WAF_LISTEN_FIELDS
+                  if k in listen and listen[k] not in (None, "", [], {})}
     new_listen["HttpsPorts"] = [443]
     new_listen["CertId"] = cert_identifier
     redirect_in = detail.get("Redirect") or {}
