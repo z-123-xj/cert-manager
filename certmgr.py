@@ -1178,10 +1178,12 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
                   if k in listen and listen[k] not in (None, "", [], {})}
     new_listen["HttpsPorts"] = [443]
     new_listen["CertId"] = cert_identifier
-    # 必须显式给合法 TLS 配置：新接入域名详情里 TLSVersion 为空，不传会让 WAF 用无效默认值，
-    # 导致 ModifyDomain 报 InvalidTLS。tlsv1.2 + 套件 1（全部套件）兼容性最好。
+    # 必须显式给一整套合法 TLS 配置：新接入域名详情里 TLS 字段为空，不传会被 WAF 判无效。
+    # tlsv1.2 + 套件 1（全部套件）+ EnableTLSv3=false 兼容性最好，且三者的组合约束自洽
+    # （EnableTLSv3 只在 tlsv1.3 时必须为 true，tlsv1.2 下必须为 false，否则报 InvalidEnableTLSv3）。
     new_listen["TLSVersion"] = "tlsv1.2"
     new_listen["CipherSuite"] = 1
+    new_listen["EnableTLSv3"] = False
     redirect_in = detail.get("Redirect") or {}
     new_redirect = {k: redirect_in[k] for k in WAF_REDIRECT_FIELDS if k in redirect_in}
     # 优先用云端现有回源，其次用配置的 origin 源站，避免开 443 时冲掉回源
