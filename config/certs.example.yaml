@@ -1,19 +1,21 @@
 # cert-manager 配置示例
 # 复制为 certs.yaml 后填写。
 #
-# 账号 AK/SK 已独立到 config/.env（复制 .env.example 填写），本文件不再写 access_key/secret。
-#   .env 里 CN1_AK / CN1_SK -> 账号 cn1；可选 CN1_REGION / CN1_ENDPOINT；
-#   WAF 用 WAF_INSTANCE_ID（必填）/ WAF_REGION（默认 cn-hangzhou）。
-#   服务器 crontab 里内联的环境变量优先级高于 .env。
+# 账号层级写在下面：aliyun_cn / aliyun_intl（下一层账号名可自定义）/ cloudflare；
+# 凭证值用 ${VAR} 从 config/.env 注入（复制 .env.example 为 .env 并填写）。
+# WAF 实例 ID 也在 .env（CN1_WAF_INSTANCE_ID 等，按账号名对应）。
+# 服务器 crontab 里内联的同名环境变量优先级高于 .env。
 #
-# 账号命名约定：阿里云按「站点+序号」cn1/intl1/cn2/intl2...；Cloudflare 按 cloudflare1/cloudflare2...
+# 第一层是平台、第二层是账号名：证书的 dns 填平台名（aliyun_cn/aliyun_intl/cloudflare），
+# dns_account 填该平台下的账号名（cn1/intl1/cloudflare1），deploy_account 同理引用账号名。
 #
 # 配置以「证书」为单位：每张证书自带 dcdn_domains（DCDN 加速域名）和/或 waf_domains（WAF 防护域名）。
 # 不再需要顶层 dcdn_domains，也不需要 cert 交叉引用。
 # certificates[] 字段速查：
 #   name            可选，证书标识 = CAS 证书名前缀；省略时取主域名
-#   dns             可选，默认 aliyun；可选 aliyun / cloudflare
-#   dns_account     DNS-01 验证账号（aliyun -> .env 账号 key；cloudflare -> cloudflare 的 key）
+#   dns             可选，默认 aliyun_cn；平台名 aliyun_cn / aliyun_intl / cloudflare
+#   dns_account     DNS-01 账号名：aliyun_* 平台下填对应分组里的账号名（如 cn1/intl1），
+#                   cloudflare 平台下填 cloudflare 段的账号名（如 cloudflare1）
 #   domains         可选，真正签进证书的 SAN 列表；省略时由 dcdn_domains + waf_domains 去重推导
 #   deploy_account  可选，证书级默认部署账号；账号 key
 #   dcdn_domains    要绑定的加速域名：字符串简写，或 {domain, deploy_account} 覆盖账号
@@ -24,22 +26,30 @@
 # 改完先跑：python3 certmgr.py --config config/certs.example.yaml --check
 # 旧格式（顶层 dcdn_domains + cert 引用）仍可自动识别，见文件末尾迁移说明。
 
-# Cloudflare DNS 验证凭证（仅当某证书 dns=cloudflare 时需要）
-# 支持多账号：每个命名子账号一组 api_token；证书用 dns_account 指定用哪一个
+aliyun_cn:                         # 国内站阿里云账号组；下一层账号名可自定义（cn1/cn2/...）
+  cn1:
+    access_key: "${CN1_AK}"
+    access_secret: "${CN1_SK}"
+    region: "cn-hangzhou"
+
+aliyun_intl:                       # 国际站阿里云账号组；下一层账号名可自定义（intl1/...）
+  intl1:
+    access_key: "${INTL1_AK}"
+    access_secret: "${INTL1_SK}"
+    region: "ap-southeast-1"
+    # endpoint: "ap-southeast-1.aliyuncs.com"
+
 cloudflare:
   cloudflare1:
-    api_token: "${CF_TOKEN_1}"      # -> acme.sh 的 CF_Token
-    account_id: "${CF_ACCOUNT_ID_1}"  # 可选 -> CF_Account_ID
-    # email: "${CF_EMAIL}"          # 仅旧版 Global Key 方式需要 -> CF_Email
-  cloudflare2:
-    api_token: "${CF_TOKEN_2}"
-    account_id: "${CF_ACCOUNT_ID_2}"
+    api_token: "${CF_TOKEN_1}"       # -> acme.sh 的 CF_Token
+    account_id: "${CF_ACCOUNT_ID_1}" # 可选 -> CF_Account_ID
+    # email: "${CF_EMAIL_1}"         # 仅旧版 Global Key 方式需要
 
 certificates:
   # 例1：显式 domains —— 需要泛域 / 裸域 / 额外 SAN 时必须写。
   #      三个域名一次签成同一张 SAN 证书；xxx.example.com 只签不部署到 DCDN。
   - name: "example.com"
-    dns: aliyun
+    dns: aliyun_cn
     dns_account: cn1
     deploy_account: cn1             # 下面所有域名的默认部署账号
     domains:
@@ -70,7 +80,7 @@ certificates:
   #      统一用证书级 waf_origin（源站）+ waf_domains（域名字符串列表）即可，无需逐域名写 origin。
   #      已接入的域名只校验证书并按需切引用；确实未接入的用 waf_origin 自动 CreateDomain。
   - name: "waf.example.net"
-    dns: aliyun
+    dns: aliyun_cn
     dns_account: cn1
     deploy_account: cn1
     domains: ["waf.example.net", "*.example.net"]   # waf 域名需在 SAN 内

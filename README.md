@@ -11,7 +11,7 @@ DCDN 与 WAF 可单独或同时启用：DCDN 用「传内容绑定」，WAF 用�
 
 ```
 certmgr.py（编排，由系统 crontab 每日驱动）
-  ├─ 读 config/.env（账号 AK/SK、WAF_INSTANCE_ID）+ config/certs.yaml
+  ├─ 读 config/.env（AK/SK、CF Token、WAF 实例 ID 的值）+ config/certs.yaml（层级结构）
   ├─ acme.sh --issue/--renew  (DNS-01 验证，调 DNS 提供方 API 加 _acme-challenge TXT)
   └─ 上传 + 绑定 + 删旧（阿里云 SDK：CAS + DCDN；WAF 3.0 用 OpenAPI）
             │
@@ -30,15 +30,15 @@ cert-manager/
 ├── requirements.txt
 └── config/
     ├── certs.example.yaml  # 配置示例（复制为 certs.yaml 后填写）
-    └── .env.example        # 账号凭证示例（复制为 .env 后填写，AK/SK/WAF_INSTANCE_ID）
+    └── .env.example        # 凭证变量值示例（复制为 .env 后填写）
 ```
 
 ## 前置条件
 
 1. 服务器已安装 Python 3.9+ 与 acme.sh（acme.sh 默认装在 `~/.acme.sh`）。
 2. 域名 DNS 需可被所选验证方式控制：
-   - `dns: aliyun`：域名 DNS 托管在对应阿里云账号（acme.sh 用其 AK 自动加 `_acme-challenge` TXT 记录）；
-   - `dns: cloudflare`：域名 DNS 在 Cloudflare，需提供 Cloudflare API Token（见配置 `cloudflare` 段）。
+   - `dns: aliyun_cn` / `dns: aliyun_intl`：域名 DNS 托管在对应阿里云站点的账号（acme.sh 用其 AK 自动加 `_acme-challenge` TXT 记录）；
+   - `dns: cloudflare`：域名 DNS 在 Cloudflare，需提供 Cloudflare API Token（在配置 `cloudflare` 段，见下）。
 3. 提供阿里云 AK（国内站 / 国际站，按需），需具备权限：
    - **SSL 证书服务（CAS）**：上传/查询/删除证书
    - **DCDN**：`SetDcdnDomainSSLCertificate`（绑定证书到加速域名）
@@ -54,20 +54,46 @@ cert-manager/
 cp config/certs.example.yaml config/certs.yaml
 ```
 
-账号 AK/SK 和 WAF 实例 ID 放在 **`config/.env`**（复制 `.env.example`），不再写进 `certs.yaml`：
+凭证分两处：**层级结构写在 `certs.yaml`，敏感值写在 `config/.env`**（复制 `.env.example`）：
 
 ```bash
-cp config/.env.example config/.env   # 填 AK/SK、WAF_INSTANCE_ID 等
+cp config/.env.example config/.env   # 填 AK/SK、CF Token、WAF 实例 ID
+chmod 600 config/.env
 ```
 
-`.env` 约定：`<账号名>_AK` / `<账号名>_SK` → 账号 `cn1`（`CN1_AK`/`CN1_SK`）；也可加 `ALIYUN_` 标记写成 `ALIYUN_CN1_AK`/`ALIYUN_CN1_SK`，同样映射成账号 `cn1`（SK/REGION 需用同样前缀），证书配置里仍写 `deploy_account: cn1`。账号的 `REGION` 也统一写在 `.env`（`CN1_REGION` / `INTL1_REGION`），**`certs.yaml` 里不再写 `accounts`**（含 region），`_ENDPOINT` 可选。WAF 实例按账号分开配：`<账号名大写>_WAF_INSTANCE_ID`（如 `CN1_WAF_INSTANCE_ID` / `INTL1_WAF_INSTANCE_ID`）+ 可选 `<账号名大写>_WAF_REGION`；全局 `WAF_INSTANCE_ID` / `WAF_REGION` 作为所有账号共用一个实例时的兜底（优先级低于账号级）。留空时脚本对每个 WAF 账号分别调 `DescribeInstance`：仅 1 个正常实例自动选用，多个则要求显式写该账号的变量（用 `--list-waf-instances` 查看各账号实例）。国内站/国际站各自查各自的账号与地域，互不混用。`.env` 是扁平 KEY=VALUE，按 `cn*` / `intl*` 前缀区分国内站/国际站（见 `.env.example` 的注释分块）。服务器 crontab 内联的同名环境变量优先级高于 `.env`。旧版写在 `certs.yaml` 的 `accounts` 仍会被读取（迁移期兼容），但 `.env` 同名字段优先。
+`certs.yaml` 里按平台分组放层级结构（`aliyun_cn` / `aliyun_intl` / `cloudflare`），值用 `${VAR}` 从 `.env` 注入：
+
+```yaml
+aliyun_cn:                    # 国内站账号组；下一层账号名可自定义
+  cn1:
+    access_key: "${CN1_AK}"
+    access_secret: "${CN1_SK}"
+    region: "cn-hangzhou"     # 国内站固定，写在 yaml
+
+aliyun_intl:                  # 国际站账号组
+  intl1:
+    access_key: "${INTL1_AK}"
+    access_secret: "${INTL1_SK}"
+    region: "ap-southeast-1"  # 国际站，必须写否则默认 cn-hangzhou 会调错
+
+cloudflare:
+  cloudflare1:
+    api_token: "${CF_TOKEN_1}"
+    account_id: "${CF_ACCOUNT_ID_1}"
+```
+
+第一层是**平台**、第二层是**账号名**，与证书字段一一对应：证书的 `dns` 填平台名（`aliyun_cn` / `aliyun_intl` / `cloudflare`），`dns_account` 填该平台下的账号名（`cn1` / `intl1` / `cloudflare1`），`deploy_account` 同样引用账号名。脚本加载时把所有 `aliyun_*` 分组下的账号拍平成一个表。旧写法 `dns: aliyun` + `accounts:` 仍兼容（`aliyun` 视为阿里云 DNS）。
+
+`.env` 只放扁平的 key=value 值（`CN1_AK` / `INTL1_AK` / `CF_TOKEN_1` 等）。**WAF 实例 ID 也放 `.env`**：按账号配 `<账号名大写>_WAF_INSTANCE_ID`（如 `CN1_WAF_INSTANCE_ID` / `INTL1_WAF_INSTANCE_ID`）+ 可选 `_WAF_REGION`；全局 `WAF_INSTANCE_ID` / `WAF_REGION` 是所有账号共用一个实例时的兜底（优先级低于账号级）。留空时脚本对每个 WAF 账号分别调 `DescribeInstance`：仅 1 个正常实例自动选用，多个则要求显式写（用 `--list-waf-instances` 查看）。国内站/国际站各查各的账号与地域，互不混用。
+
+服务器 crontab 内联的同名环境变量优先级高于 `.env`。国际站账号 `region: ap-southeast-1` 必须写在 yaml，否则默认 `cn-hangzhou` 会调错。
 
 配置以**证书为单位**：每张证书自带 `dcdn_domains`（DCDN）和/或 `waf_domains`（WAF），不需要顶层 `dcdn_domains`，也不需要 `cert` 交叉引用。
 
 ```yaml
 certificates:
   - name: "example.org"            # 可选：证书标识 = CAS 证书名前缀；省略时取主域名
-    dns: cloudflare                # 可选，默认 aliyun（aliyun / cloudflare）
+    dns: aliyun_cn                  # 可选，默认 aliyun_cn（aliyun_cn / aliyun_intl / cloudflare）
     dns_account: cloudflare1       # DNS-01 验证账号
     deploy_account: intl1          # 可选：证书级默认部署账号
     # domains: ["example.org", "*.example.org"]   # 可选：需要泛域/裸域/额外 SAN 时写
@@ -92,7 +118,7 @@ certificates:
   - 已接入但 443 未开 → `ModifyDomain` 开 443 并绑证书（带回现有回源配置，不会冲掉）；
   - 确实未接入且有源站（`origin`/`waf_origin`）→ 自动 `CreateDomain` 接入（HTTP 80 起步）再开 443；无源站则跳过并告警；
   - 接入状态查询失败 → 本次跳过（不自动接入，避免误判重复创建）。
-- **`dns` / `dns_account`**：`aliyun` 用 `.env` 账号的 AK 去阿里云 DNS 加 TXT；`cloudflare` 用 `cloudflare` 段下命名子账号的 API Token。`dns_account` 省略时取对应段的第一个 key；`cloudflare` 单账号旧写法也会自动归一化。
+- **`dns` / `dns_account`**：`dns` 是平台名 —— `aliyun_cn` / `aliyun_intl` 用对应 `aliyun_*` 分组账号的 AK 去阿里云 DNS 加 TXT（acme.sh `dns_ali`），`cloudflare` 用 `cloudflare` 段下账号的 API Token（`dns_cf`）。`dns_account` 是平台下的账号名（如 `cn1`/`intl1`/`cloudflare1`）；省略时取对应段的第一个账号。旧写法 `dns: aliyun` 仍视为阿里云 DNS。`cloudflare` 单账号旧写法也会自动归一化。
 
 DNS 在 Cloudflare、DCDN/WAF 在阿里云互不影响的用法仍然支持。每个证书只签发一次，按「证书 + 部署账号」分组，每组只上传一次。
 
@@ -113,7 +139,7 @@ pip install -r requirements.txt
 
 # 2) 准备配置
 cp config/certs.example.yaml config/certs.yaml   # 填域名
-cp config/.env.example config/.env               # 填 AK/SK、WAF_INSTANCE_ID（.env 已被 gitignore）
+cp config/.env.example config/.env               # 填 AK/SK、CF Token、WAF 实例 ID 的值（.env 已被 gitignore）
 chmod 600 config/.env
 
 # 3) acme.sh 目录（本机默认 ~/.acme.sh，容器默认 /acme.sh）
@@ -137,8 +163,8 @@ crontab -l | grep -v 'acme.sh --cron' | crontab -
 crontab -e
 # 加入（用 venv 里 python 绝对路径）。脚本会自行加载 config/.env，cron 行无需 AK 变量：
 17 3 * * * cd /opt/cert-manager && /opt/cert-manager/venv/bin/python3 certmgr.py --config /opt/cert-manager/config/certs.yaml >> /opt/cert-manager/logs/certmgr.log 2>&1
-# 如不想把 AK 落在 .env，也可在 cron 行内联 CN1_AK/CN1_SK/WAF_INSTANCE_ID 等（优先级高于 .env）：
-# 17 3 * * * CN1_AK=xxx CN1_SK=xxx WAF_INSTANCE_ID=waf_xxx LE_WORKING_DIR=/root/.acme.sh cd /opt/cert-manager && /opt/cert-manager/venv/bin/python3 certmgr.py --config /opt/cert-manager/config/certs.yaml >> /opt/cert-manager/logs/certmgr.log 2>&1
+# 如不想把凭证落在 .env，也可在 cron 行内联（优先级高于 .env）：
+# 17 3 * * * CN1_AK=xxx CN1_SK=xxx CF_TOKEN_1=xxx CN1_WAF_INSTANCE_ID=waf_xxx LE_WORKING_DIR=/root/.acme.sh cd /opt/cert-manager && /opt/cert-manager/venv/bin/python3 certmgr.py --config /opt/cert-manager/config/certs.yaml >> /opt/cert-manager/logs/certmgr.log 2>&1
 ```
 
 WAF 首次接入注意：`CreateDomain` 要求域名已完成**域名归属权验证**与（国内站）**ICP 备案**，

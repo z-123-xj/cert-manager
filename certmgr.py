@@ -116,49 +116,38 @@ def load_env_file(path):
                 os.environ.setdefault(k, v)
 
 
-def accounts_from_env():
-    """从 <PREFIX>_AK / <PREFIX>_SK（及可选 _REGION/_ENDPOINT）构造阿里云账号表。
-    前缀即账号名（小写）：CN1_AK/CN1_SK -> cn1；也接受 ALIYUN_CN1_AK -> cn1
-    （ALIYUN_ 只是可选标记，去掉后作为账号名，certs.yaml 里仍写 deploy_account: cn1）。
-    AK/SK 必须成对才收集。Cloudflare 凭证不走这里（在 yaml 的 cloudflare 段）。"""
-    accounts = {}
-    for key in list(os.environ):
-        m = re.fullmatch(r"([A-Za-z0-9_]+)_AK", key)
-        if not m:
+def dns_kind(dns):
+    """把证书的 dns 平台名归一为 aliyun / cloudflare。
+    aliyun_cn / aliyun_intl 都是阿里云 DNS（对应配置里的 aliyun_* 分组）；cloudflare 保持。"""
+    if dns == "cloudflare":
+        return "cloudflare"
+    if dns == "aliyun" or (isinstance(dns, str) and dns.startswith("aliyun_")):
+        return "aliyun"
+    return None
+
+
+def flatten_aliyun_groups(cfg):
+    """把顶层 aliyun_* 分组（如 aliyun_cn / aliyun_intl）的下一层账号拍平进 accounts。
+    下一层 key 即自定义账号名（cn1/intl1/...），与 dns_account/deploy_account 对应。
+    分组名只是组织用途（国内站/国际站），不参与账号名；顶层 accounts 旧写法仍兼容。"""
+    accounts = dict(cfg.get("accounts") or {})
+    for key, value in cfg.items():
+        if not (isinstance(key, str) and key.startswith("aliyun_") and isinstance(value, dict)):
             continue
-        prefix = m.group(1)  # 原样用于读取同前缀的 SK/REGION/ENDPOINT
-        name = prefix[len("ALIYUN_"):] if prefix.startswith("ALIYUN_") else prefix
-        if not name:
-            continue
-        ak = os.environ.get(prefix + "_AK")
-        sk = os.environ.get(prefix + "_SK")
-        if not (ak and sk):
-            continue
-        acc = {"access_key": ak, "access_secret": sk}
-        region = os.environ.get(prefix + "_REGION")
-        endpoint = os.environ.get(prefix + "_ENDPOINT")
-        if region:
-            acc["region"] = region
-        if endpoint:
-            acc["endpoint"] = endpoint
-        accounts[name.lower()] = acc
-    return accounts
+        for name, acc in value.items():
+            if isinstance(acc, dict):
+                accounts[name] = dict(acc)
+    cfg["accounts"] = accounts
+    return cfg
 
 
 def load_config(path):
-    # 先加载 certs.yaml 同目录的 .env，再做 ${VAR} 展开
+    # 加载 certs.yaml 同目录的 .env 作为变量值，再展开 yaml 里的 ${VAR}。
+    # 账号层级（aliyun_* 分组 / cloudflare）写在 certs.yaml；.env 只放扁平 key=value 值。
     load_env_file(os.path.join(os.path.dirname(os.path.abspath(path)), ".env"))
     with open(path, "r", encoding="utf-8") as f:
         cfg = expand_env(yaml.safe_load(f)) or {}
-    # 字段级合并：.env 的同名字段覆盖 yaml 账号字段，但保留 yaml 里独有的 region/endpoint 等
-    # （迁移期兼容：yaml 里写 region、.env 只写 AK/SK 时，region 不会丢）
-    merged = {}
-    for name, acc in (cfg.get("accounts") or {}).items():
-        merged[name] = dict(acc) if isinstance(acc, dict) else {}
-    for name, acc in accounts_from_env().items():
-        merged.setdefault(name, {}).update(acc)
-    cfg["accounts"] = merged
-    return cfg
+    return flatten_aliyun_groups(cfg)
 
 
 # ----------------------------- 配置归一化 -----------------------------
@@ -225,10 +214,10 @@ def normalize_config(cfg):
         if not isinstance(raw, dict):
             continue
         c = dict(raw)
-        c.setdefault("dns", "aliyun")
+        c.setdefault("dns", "aliyun_cn")
         if not c.get("dns_account"):
-            # cloudflare 从 cloudflare 段取第一个账号；aliyun 从 accounts 取（避免串用）
-            c["dns_account"] = (next(iter(cf), None) if c["dns"] == "cloudflare"
+            # cloudflare 从 cloudflare 段取第一个账号；aliyun_* 从 accounts 取（避免串用）
+            c["dns_account"] = (next(iter(cf), None) if dns_kind(c["dns"]) == "cloudflare"
                                 else (c.get("account") or first_acc))
         default_deploy = c.get("deploy_account") or c.get("account") or first_acc
         c["dcdn_domains"] = dcdn_items(c.get("dcdn_domains"), default_deploy)
@@ -259,7 +248,7 @@ def normalize_config(cfg):
         cert = (next((c for c in norm if c.get("name") == cert_name), None)
                 if cert_name else match_cert(domain, norm))
         if cert is None:
-            norm.append({"name": cert_name or "<未匹配>", "dns": "aliyun", "domains": [],
+            norm.append({"name": cert_name or "<未匹配>", "dns": "aliyun_cn", "domains": [],
                          "dcdn_domains": [], "_unmatched": domain})
             continue
         cert["dcdn_domains"].append({
@@ -296,15 +285,17 @@ def validate_config(cfg):
             errors.append(f"{tag}: name 重复（name 是 CAS 证书名前缀，必须唯一）")
         seen_names.add(name)
         dns, acc_name = c.get("dns"), c.get("dns_account")
-        if dns not in ("aliyun", "cloudflare"):
-            errors.append(f"{tag}: 不支持的 dns={dns}（仅 aliyun / cloudflare）")
-        if dns == "aliyun":
+        kind = dns_kind(dns)
+        if not kind:
+            errors.append(f"{tag}: 不支持的 dns={dns}（仅 aliyun_cn / aliyun_intl / cloudflare；"
+                          f"兼容 aliyun）")
+        if kind == "aliyun":
             acc = accounts.get(acc_name) if acc_name else None
             if not isinstance(acc, dict):
-                errors.append(f"{tag}: dns_account={acc_name} 不在 accounts 中")
+                errors.append(f"{tag}: dns_account={acc_name} 不在 aliyun_* 分组账号中")
             elif not (acc.get("access_key") and acc.get("access_secret")):
                 errors.append(f"{tag}: DNS 账号 {acc_name} 缺少 access_key/access_secret")
-        elif dns == "cloudflare":
+        elif kind == "cloudflare":
             cf_cfg = cf.get(acc_name) if acc_name and isinstance(cf, dict) else None
             if not (isinstance(cf_cfg, dict) and cf_cfg.get("api_token")):
                 errors.append(f"{tag}: dns_account={acc_name} 在 cloudflare 中不存在或缺少 api_token")
@@ -493,12 +484,13 @@ def match_cert(domain, certs):
 # ----------------------------- 签发单个证书 -----------------------------
 def issue_certificate(cert, accounts, cf, force):
     name = cert["name"]
-    dns = cert.get("dns", "aliyun")
-    if dns == "aliyun":
+    dns = cert.get("dns", "aliyun_cn")
+    kind = dns_kind(dns)
+    if kind == "aliyun":
         acc_name = cert.get("dns_account")
         acc = accounts.get(acc_name)
         if not acc:
-            log(f"[ERROR] 证书 {name} dns=aliyun 但 DNS 账号 {acc_name} 不存在，跳过")
+            log(f"[ERROR] 证书 {name} dns={dns} 但 DNS 账号 {acc_name} 不在 aliyun_* 分组中，跳过")
             return
         # acme.sh 的 dns_ali 插件读取的变量名是「首字母大写的 Ali_Key / Ali_Secret」
         # （不是 ALI_KEY，也不是全大写的 ALI_Key），大小写必须精确匹配，否则凭证读不到 → 签发失败。
@@ -511,7 +503,7 @@ def issue_certificate(cert, accounts, cf, force):
         # 调试用：打印账号名 + 脱敏 access_key，便于确认实际使用的是哪个 DNS 账号
         log(f"[DEBUG] 证书 {name} 使用 DNS 账号 {acc_name} 签发（Ali_Key={k[:10]}****，请核对阿里云控制台该账号 AccessKey 前缀是否一致）")
         dns_arg = "dns_ali"
-    elif dns == "cloudflare":
+    elif kind == "cloudflare":
         # cloudflare 支持多账号（命名子字典）；也兼容旧的「单账号直接写在 cloudflare 下」写法
         cf_name = cert.get("dns_account")
         cf_cfg = None
