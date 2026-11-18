@@ -1350,6 +1350,8 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
         cur_cert = listen.get("CertId") or (detail.get("CertDetail") or {}).get("Id")
         same_cert = waf_cert_number(cur_cert) == cert_number
         has_443 = 443 in https_ports or "443" in [str(p) for p in https_ports]
+        log(f"[DEBUG] WAF {domain} HttpsPorts={https_ports} has_443={has_443} "
+            f"当前证书={cur_cert} 目标证书={cert_number} same_cert={same_cert}")
 
         if has_443 and same_cert and not force:
             log(f"[SKIP] WAF {domain} 443 已开且证书一致（CertId={cur_cert}），跳过")
@@ -1363,11 +1365,12 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                     }, waf_region)
                     log(f"[BIND] WAF {domain} 换证书 -> {waf_label}（原 CertId={cur_cert}）")
                 except Exception as e:
-                    if "NeedSsl" not in str(e):
+                    err = str(e)
+                    # 该实例上 ModifyDomainCert 常因 WAF 侧 SSL/TLS 状态异常被拒（NeedSsl / InvalidTLS），
+                    # 而 ModifyDomain 带完整 Listen+Redirect 可靠可用，故两类错误统一回退到它。
+                    if "NeedSsl" not in err and "InvalidTLS" not in err:
                         raise
-                    # DescribeDomainDetail 看到 443 但 WAF 判定未开 SSL 保护：回退到
-                    # ModifyDomain 显式带完整 Listen(HttpsPorts=443, CertId) + Redirect 开 443 绑定
-                    log(f"[WARN] WAF {domain} 换证书报 NeedSsl（WAF 侧未真正开启 SSL），"
+                    log(f"[WARN] WAF {domain} 换证书报 SSL/TLS 状态异常（{'InvalidTLS' if 'InvalidTLS' in err else 'NeedSsl'}），"
                         f"改用 ModifyDomain 显式开 443 并绑定")
                     backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
                     log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
