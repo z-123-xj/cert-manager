@@ -494,8 +494,7 @@ def find_cert_id_by_name(client, name):
                  or c.get("CertName") or c.get("CommonName"))
         if cname == name:
             return c.get("id") or c.get("CertId") or c.get("certId")
-    names = [c.get("name") or c.get("Name") or c.get("certName") for c in certs]
-    log(f"[DEBUG] 列表未匹配 name={name}；共 {len(certs)} 张；名称列表(前20)={names[:20]}")
+    log(f"[DEBUG] 列表未匹配 name={name}；共 {len(certs)} 张")
     return None
 
 
@@ -947,6 +946,26 @@ def waf_backends(redirect):
     return out
 
 
+def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identifier):
+    """用 ModifyDomain 显式开启 443 并绑定证书：必须带完整 Listen + Redirect，
+    并保留云端现有回源，否则会冲掉已配置的转发规则。返回实际使用的源站列表。"""
+    listen = detail.get("Listen") or {}
+    new_listen = {k: listen[k] for k in WAF_LISTEN_FIELDS if k in listen}
+    new_listen["HttpsPorts"] = [443]
+    new_listen["CertId"] = cert_identifier
+    redirect_in = detail.get("Redirect") or {}
+    new_redirect = {k: redirect_in[k] for k in WAF_REDIRECT_FIELDS if k in redirect_in}
+    # 优先用云端现有回源，其次用配置的 origin 源站，避免开 443 时冲掉回源
+    backends = waf_backends(redirect_in) or item.get("origin") or []
+    new_redirect["Backends"] = backends
+    new_redirect.setdefault("Loadbalance", "iphash")
+    waf_api(client, "ModifyDomain", {
+        "InstanceId": iid, "Domain": domain, "AccessType": "share",
+        "Listen": new_listen, "Redirect": new_redirect,
+    }, region)
+    return backends
+
+
 def waf_wait_cert_visible(client, region, iid, cert_number, tries=6, interval=10):
     """等上传到 CAS 的证书同步进 WAF 可选证书库；可见返回 CertIdentifier，超时返回拼接兜底值。"""
     fallback = f"{cert_number}-{region}"
@@ -1067,26 +1086,24 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             continue
         try:
             if has_443:
-                # 只换证书引用，不碰端口/转发（ModifyDomainCert 无 HttpsPorts 参数）
-                waf_api(client, "ModifyDomainCert", {
-                    "InstanceId": iid, "Domain": domain, "CertId": cert_identifier,
-                }, waf_region)
-                log(f"[BIND] WAF {domain} 换证书 -> {waf_label}（原 CertId={cur_cert}）")
+                try:
+                    # 只换证书引用，不碰端口/转发（ModifyDomainCert 无 HttpsPorts 参数）
+                    waf_api(client, "ModifyDomainCert", {
+                        "InstanceId": iid, "Domain": domain, "CertId": cert_identifier,
+                    }, waf_region)
+                    log(f"[BIND] WAF {domain} 换证书 -> {waf_label}（原 CertId={cur_cert}）")
+                except Exception as e:
+                    if "NeedSsl" not in str(e):
+                        raise
+                    # DescribeDomainDetail 看到 443 但 WAF 判定未开 SSL 保护：回退到
+                    # ModifyDomain 显式带完整 Listen(HttpsPorts=443, CertId) + Redirect 开 443 绑定
+                    log(f"[WARN] WAF {domain} 换证书报 NeedSsl（WAF 侧未真正开启 SSL），"
+                        f"改用 ModifyDomain 显式开 443 并绑定")
+                    backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
+                    log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
             else:
                 # 首次开 443：ModifyDomain 必须带完整 Listen + Redirect，否则会冲掉回源配置
-                new_listen = {k: listen[k] for k in WAF_LISTEN_FIELDS if k in listen}
-                new_listen["HttpsPorts"] = [443]
-                new_listen["CertId"] = cert_identifier
-                redirect_in = detail.get("Redirect") or {}
-                new_redirect = {k: redirect_in[k] for k in WAF_REDIRECT_FIELDS if k in redirect_in}
-                # 优先用云端现有回源，其次用配置的 origin 源站，避免开 443 时冲掉回源
-                backends = waf_backends(redirect_in) or item.get("origin") or []
-                new_redirect["Backends"] = backends
-                new_redirect.setdefault("Loadbalance", "iphash")
-                waf_api(client, "ModifyDomain", {
-                    "InstanceId": iid, "Domain": domain, "AccessType": "share",
-                    "Listen": new_listen, "Redirect": new_redirect,
-                }, waf_region)
+                backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
                 log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
         except Exception as e:
             log(f"[ERROR] WAF {domain} 绑定证书失败: {e}")
