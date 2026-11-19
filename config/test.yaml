@@ -192,7 +192,7 @@ certificates:
     dns: cloudflare
     domains: ["111wuw.bet", "*.111wuw.bet"]
     waf_domains:
-      - domain: "111wuw.bet"
+      - domain: "*.111wuw.bet"
         deploy: aliyun_cn
         waf_origin: "47.84.116.133"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
@@ -202,7 +202,214 @@ certificates:
     dns: cloudflare
     domains: ["222wuw.bet", "*.222wuw.bet"]
     waf_domains:
-      - domain: "222wuw.bet"
+      - domain: "*.222wuw.bet"
         deploy: aliyun_cn
         waf_origin: "47.84.116.133"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "333wuw.bet"
+    dns: cloudflare
+    domains: ["333wuw.bet", "*.333wuw.bet"]
+    waf_domains:
+      - domain: "*.333wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "444wuw.bet"
+    dns: cloudflare
+    domains: ["444wuw.bet", "*.444wuw.bet"]
+    waf_domains:
+      - domain: "*.444wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "555wuw.bet"
+    dns: cloudflare
+    domains: ["555wuw.bet", "*.555wuw.bet"]
+    waf_domains:
+      - domain: "*.555wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "666wuw.bet"
+    dns: cloudflare
+    domains: ["666wuw.bet", "*.666wuw.bet"]
+    waf_domains:
+      - domain: "*.666wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "777wuw.bet"
+    dns: cloudflare
+    domains: ["777wuw.bet", "*.777wuw.bet"]
+    waf_domains:
+      - domain: "*.777wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "888wuw.bet"
+    dns: cloudflare
+    domains: ["888wuw.bet", "*.888wuw.bet"]
+    waf_domains:
+      - domain: "*.888wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)   
+
+  - name: "999wuw.bet"
+    dns: cloudflare
+    domains: ["999wuw.bet", "*.999wuw.bet"]
+    waf_domains:
+      - domain: "*.999wuw.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "bnswgww.com"
+    dns: aliyun_intl
+    domains: ["bnswgww.com", "*.bnswgww.com"]
+    waf_domains:
+      - domain: "bnswgww.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "asjwiws.com"
+    dns: aliyun_intl
+    domains: ["asjwiws.com", "*.asjwiws.com"]
+    waf_domains:
+      - domain: "asjwiws.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "guslwox.com"
+    dns: aliyun_intl
+    domains: ["guslwox.com", "*.guslwox.com"]
+    waf_domains:
+      - domain: "guslwox.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "wuydksw.com"
+    dns: aliyun_intl
+    domains: ["wuydksw.com", "*.wuydksw.com"]
+    waf_domains:
+      - domain: "wuydksw.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "uwmslcw.com"
+    dns: aliyun_intl
+    domains: ["uwmslcw.com", "*.uwmslcw.com"]
+    waf_domains:
+      - domain: "uwmslcw.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "iwpzsld.com"
+    dns: aliyun_intl
+    domains: ["iwpzsld.com", "*.iwpzsld.com"]
+    waf_domains:
+      - domain: "iwpzsld.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "uksmgls.com"
+    dns: aliyun_intl
+    domains: ["uksmgls.com", "*.uksmgls.com"]
+    waf_domains:
+      - domain: "uksmgls.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "piojska.com"
+    dns: aliyun_intl
+    domains: ["piojska.com", "*.piojska.com"]
+    waf_domains:
+      - domain: "piojska.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "vosiwas.com"
+    dns: aliyun_intl
+    domains: ["vosiwas.com", "*.vosiwas.com"]
+    waf_domains:
+      - domain: "vosiwas.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "vjkdsoa.com"
+    dns: aliyun_intl
+    domains: ["vjkdsoa.com", "*.vjkdsoa.com"]
+    waf_domains:
+      - domain: "vjkdsoa.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "happyp.vip"
+    dns: aliyun_cn
+    domains: ["happyp.vip", "*.happyp.vip"]
+    waf_domains:
+      - domain: "*.happyp.vip"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "octbwp.com"
+    dns: aliyun_intl
+    domains: ["octbwp.com", "*.octbwp.com"]
+    waf_domains:
+      - domain: "*.octbwp.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "yeslsbg.com"
+    dns: aliyun_intl
+    domains: ["yeslsbg.com", "*.yeslsbg.com"]
+    waf_domains:
+      - domain: "*.yeslsbg.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+# 源站是47.236.238.77
+  - name: "385937.com"
+    dns: aliyun_intl
+    domains: ["385937.com", "*.385937.com"]
+    waf_domains:
+      - domain: "*.385937.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "bpapithree.com"
+    dns: aliyun_intl
+    domains: ["bpapithree.com", "*.bpapithree.com"]
+    waf_domains:
+      - domain: "*.bpapithree.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+bgwjsq.com
+chatsjssupergame.com
+jssupergame.com
+mbvidha.com
+vuenslc.com
+vuwkmvn.com
+vyppssm.com
+wumslmv.com

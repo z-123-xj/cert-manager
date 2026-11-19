@@ -85,7 +85,41 @@ def check_acme():
 
 
 def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+    if msg == "":
+        print("", flush=True)  # 空消息打印纯空行，用于分隔不同域名/产品的日志块
+    else:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def _pad(s, width):
+    """按终端显示宽度左对齐补齐（中文按 2 列算），用于汇总表格。"""
+    s = str(s)
+    w = sum(2 if ord(ch) > 127 else 1 for ch in s)
+    return s + " " * max(0, width - w)
+
+
+class RunStats:
+    """一次运行的成功/跳过/失败计数：签发按证书，DCDN/WAF 按域名。"""
+    PRODUCTS = ("证书签发", "DCDN", "WAF")
+
+    def __init__(self):
+        self.data = {p: {"ok": 0, "skip": 0, "fail": 0} for p in self.PRODUCTS}
+
+    def add(self, product, status, n=1):
+        if product in self.data and status in self.data[product]:
+            self.data[product][status] += n
+
+    def render(self):
+        log("")
+        log("=" * 42)
+        log("执行结果汇总（签发按证书，DCDN/WAF 按域名）")
+        log("-" * 42)
+        log(_pad("产品", 14) + _pad("成功", 8) + _pad("跳过", 8) + _pad("失败", 8))
+        log("-" * 42)
+        for name in self.PRODUCTS:
+            c = self.data[name]
+            log(_pad(name, 14) + _pad(c["ok"], 8) + _pad(c["skip"], 8) + _pad(c["fail"], 8))
+        log("=" * 42)
 
 
 # ----------------------------- 配置加载 -----------------------------
@@ -537,7 +571,7 @@ def match_cert(domain, certs):
 
 
 # ----------------------------- 签发单个证书 -----------------------------
-def issue_certificate(cert, accounts, cf, force):
+def issue_certificate(cert, accounts, cf, force, stats=None):
     name = cert["name"]
     dns = cert.get("dns", "aliyun_cn")
     kind = dns_kind(dns)
@@ -546,6 +580,8 @@ def issue_certificate(cert, accounts, cf, force):
         acc = accounts.get(acc_name)
         if not acc:
             log(f"[ERROR] 证书 {name} dns={dns} 但 DNS 账号 {acc_name} 不在 aliyun_* 分组中，跳过")
+            if stats:
+                stats.add("证书签发", "fail")
             return
         # acme.sh 的 dns_ali 插件读取的变量名是「首字母大写的 Ali_Key / Ali_Secret」
         # （不是 ALI_KEY，也不是全大写的 ALI_Key），大小写必须精确匹配，否则凭证读不到 → 签发失败。
@@ -553,6 +589,8 @@ def issue_certificate(cert, accounts, cf, force):
         s = acc.get("access_secret")
         if not (k and s):
             log(f"[ERROR] 证书 {name} 的 DNS 账号 {acc_name} 未配置 access_key/access_secret，跳过签发")
+            if stats:
+                stats.add("证书签发", "fail")
             return
         acme_env = {"Ali_Key": k, "Ali_Secret": s}
         # 调试用：打印账号名 + 脱敏 access_key，便于确认实际使用的是哪个 DNS 账号
@@ -569,6 +607,8 @@ def issue_certificate(cert, accounts, cf, force):
                 cf_cfg = cf
         if not isinstance(cf_cfg, dict) or not cf_cfg.get("api_token"):
             log(f"[ERROR] 证书 {name} dns=cloudflare 凭证缺失（dns_account={cf_name}），跳过")
+            if stats:
+                stats.add("证书签发", "fail")
             return
         acme_env = {"CF_Token": cf_cfg["api_token"]}
         if cf_cfg.get("account_id"):
@@ -578,6 +618,8 @@ def issue_certificate(cert, accounts, cf, force):
         dns_arg = "dns_cf"
     else:
         log(f"[ERROR] 证书 {name} 不支持的 dns={dns}，跳过")
+        if stats:
+            stats.add("证书签发", "fail")
         return
     domains = cert_domains(cert)
     cert_file, _ = cert_paths(domains[0])
@@ -588,11 +630,17 @@ def issue_certificate(cert, accounts, cf, force):
             f"调用 renew，acme.sh 未到期会自动跳过")
     else:
         log(f"[INFO] {name} 开始签发（{'--force 强制重签' if force else '本地无证书'}）")
-    ok, _out = run_acme(domains, dns_arg, acme_env, renew=exists and not force)
+    ok, out = run_acme(domains, dns_arg, acme_env, renew=exists and not force)
     if not ok:
         log(f"[ERROR] acme.sh 签发 {name} 失败（dns_account={cert.get('dns_account')}）："
             f"请检查该 DNS 账号凭证是否正确、是否拥有对应域名的解析权限")
+        if stats:
+            stats.add("证书签发", "fail")
         return
+    # renew 未到期时 acme.sh 打印 Skipping，本质是没有重新签发，归为「跳过」更贴合语义
+    if stats:
+        stats.add("证书签发", "skip" if "Skipping" in out else "ok")
+    log("")  # 每张证书处理完空一行
 
 
 # ----------------------------- 部署一组（证书 + 账号） -----------------------------
@@ -646,7 +694,7 @@ def cert_expiry_date(cert_file):
         return "?"
 
 
-def deploy_cert_group(cert, account, acc_name, domains, force):
+def deploy_cert_group(cert, account, acc_name, domains, force, stats=None):
     """以 DCDN 云端实际绑定状态为准做幂等：逐域名查当前绑定证书，与本地上传的
     证书内容一致即跳过；否则上传（acme_ 前缀命名）并绑定，最后清理同名前缀的旧证书
     （只动 acme_ 前缀，不碰手动上传的其他证书）。"""
@@ -655,6 +703,8 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
     cert_file, key_file = cert_paths(main)
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
+        if stats:
+            stats.add("DCDN", "fail", len(domains))
         return
     cert_pem = open(cert_file, "r", encoding="utf-8").read()
     key_pem = open(key_file, "r", encoding="utf-8").read()
@@ -682,6 +732,9 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
                 and str(bound.get("SSLProtocol")) == "on"
                 and _leaf_pem(bound.get("SSLPub") or "") == local_pem):
             log(f"[SKIP] {domain} 已绑定该证书（CertName={old_name}），跳过")
+            if stats:
+                stats.add("DCDN", "skip")
+            log("")  # 每个域名处理完空一行
             continue
         to_bind.append((domain, old_name or None))
     if not to_bind:
@@ -706,6 +759,8 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
                     reused = True
             if not cert_id:
                 log(f"[ERROR] 上传证书到阿里云失败: {e}")
+                if stats:
+                    stats.add("DCDN", "fail", len(to_bind))
                 return
         if cert_id and not reused:
             log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
@@ -713,6 +768,8 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
         reused = True
     if not cert_id:
         log(f"[ERROR] 上传证书未返回 CertId")
+        if stats:
+            stats.add("DCDN", "fail", len(to_bind))
         return
     if reused:
         log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
@@ -741,13 +798,20 @@ def deploy_cert_group(cert, account, acc_name, domains, force):
                 log(f"[BIND] {domain} -> {dcdn_label(domain)}（替换原证书 {old_name}）")
             else:
                 log(f"[BIND] {domain} -> {dcdn_label(domain)}（原未开启 HTTPS 或查不到绑定记录）")
+            if stats:
+                stats.add("DCDN", "ok")
         except Exception as e:
             if "CertNameAlreadyExists" in str(e):
                 # DCDN 库已存在同名证书，接口不允许覆盖/切换引用，只能控制台手动改绑
                 log(f"[SKIP] {domain} 绑定失败：DCDN 已存在同名证书 {dcdn_label(domain)}"
                     f"（若未生效，请在 DCDN 控制台把该域名改绑到 {dcdn_label(domain)} 后重跑）")
+                if stats:
+                    stats.add("DCDN", "skip")
             else:
                 log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
+                if stats:
+                    stats.add("DCDN", "fail")
+        log("")  # 每个域名处理完空一行
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
     delete_old_certs(client, f"acme_{safe}_", keep=cert_id)
 
@@ -1246,7 +1310,7 @@ def waf_wait_cert_visible(client, region, iid, cert_number, tries=6, interval=10
 
 
 def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_id=None, region=None,
-                     accounts=None, cf=None):
+                     accounts=None, cf=None, stats=None):
     """WAF 3.0 部署：证书换名上传到 CAS（acme_waf_ 前缀，避开 DCDN 同名冲突），
     逐域名查 443/当前证书做幂等；确实未接入且配了源站（origin/waf_origin）则自动以 HTTP 接入。
     platform=部署平台（如 aliyun_cn），与 acc_name 配对决定用哪个账号；region=WAF 地域
@@ -1261,6 +1325,8 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
         log(f"[ERROR] 平台 {platform or '-'} 账号 {acc_name} 缺少 WAF 实例 ID"
             f"（证书 waf_id / .env 配 {plat_up}_{acc_up}_WAF_INSTANCE_ID / {acc_up}_WAF_INSTANCE_ID "
             f"或全局 WAF_INSTANCE_ID），跳过该组 WAF 部署")
+        if stats:
+            stats.add("WAF", "fail", len(items))
         return
 
     cert_name = cert["name"]
@@ -1268,6 +1334,8 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
     cert_file, key_file = cert_paths(main)
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过 WAF 部署")
+        if stats:
+            stats.add("WAF", "fail", len(items))
         return
     cert_pem = open(cert_file, "r", encoding="utf-8").read()
     key_pem = open(key_file, "r", encoding="utf-8").read()
@@ -1282,12 +1350,18 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
         rec, ok = waf_find_domain(client, waf_region, iid, domain)
         if not ok:
             log(f"[WARN] WAF {domain} 接入状态查询失败，本次跳过（不自动接入，避免重复创建）")
+            if stats:
+                stats.add("WAF", "skip")
+            log("")
             continue
         if rec is None:
             origin = item.get("origin")
             if not origin:
                 log(f"[WARN] WAF {domain} 未接入且未配 origin 源站，无法自动接入，跳过"
                     f"（请在 waf_domains 写 origin 或证书级 waf_origin，或先在控制台接入）")
+                if stats:
+                    stats.add("WAF", "skip")
+                log("")
                 continue
             create_params = {
                 "InstanceId": iid, "Domain": domain, "AccessType": "share",
@@ -1319,6 +1393,9 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                     log(f"[ERROR] WAF 接入域名 {domain} 失败: {e}")
                     break
             if not joined:
+                if stats:
+                    stats.add("WAF", "fail")
+                log("")
                 continue
             time.sleep(3)  # 等接入生效再查详情
         targets.append(item)
@@ -1340,10 +1417,14 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                 cert_id = find_cert_id_by_name(client, waf_label)
             if not cert_id:
                 log(f"[ERROR] 上传 WAF 证书到阿里云失败: {e}")
+                if stats:
+                    stats.add("WAF", "fail", len(targets))
                 return
         log(f"已上传 WAF 证书 cert_id={cert_id}（账号 {acc_name}，名称 {waf_label}）")
     if not cert_id:
         log("[ERROR] 上传 WAF 证书未返回 CertId")
+        if stats:
+            stats.add("WAF", "fail", len(targets))
         return
     cert_number = str(cert_id)
     cert_identifier = waf_wait_cert_visible(client, waf_region, iid, cert_number)
@@ -1355,6 +1436,9 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
         detail = waf_domain_detail(client, waf_region, iid, domain)
         if not detail or not detail.get("Listen"):
             log(f"[WARN] 查不到 {domain} 的 WAF 监听配置，跳过")
+            if stats:
+                stats.add("WAF", "skip")
+            log("")
             continue
         listen = detail["Listen"] or {}
         https_ports = listen.get("HttpsPorts") or []
@@ -1366,6 +1450,9 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
 
         if has_443 and same_cert and not force:
             log(f"[SKIP] WAF {domain} 443 已开且证书一致（CertId={cur_cert}），跳过")
+            if stats:
+                stats.add("WAF", "skip")
+            log("")
             continue
         try:
             if has_443:
@@ -1375,6 +1462,8 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                         "InstanceId": iid, "Domain": domain, "CertId": cert_identifier,
                     }, waf_region)
                     log(f"[BIND] WAF {domain} 换证书 -> {waf_label}（原 CertId={cur_cert}）")
+                    if stats:
+                        stats.add("WAF", "ok")
                 except Exception as e:
                     err = str(e)
                     # 该实例上 ModifyDomainCert 常因 WAF 侧 SSL/TLS 状态异常被拒（NeedSsl / InvalidTLS），
@@ -1385,12 +1474,19 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                         f"改用 ModifyDomain 显式开 443 并绑定")
                     backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
                     log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
+                    if stats:
+                        stats.add("WAF", "ok")
             else:
                 # 首次开 443：ModifyDomain 必须带完整 Listen + Redirect，否则会冲掉回源配置
                 backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
                 log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
+                if stats:
+                    stats.add("WAF", "ok")
         except Exception as e:
             log(f"[ERROR] WAF {domain} 绑定证书失败: {e}")
+            if stats:
+                stats.add("WAF", "fail")
+        log("")  # 每个域名处理完空一行
 
     # 3) 清理本脚本上传的 WAF 旧证书（仅 acme_waf_<cert_name>_ 前缀）
     delete_old_certs(client, f"acme_waf_{safe}_", keep=cert_id)
@@ -1401,6 +1497,7 @@ def process(cfg, force=False):
     accounts = cfg.get("accounts") or {}
     cf = cfg.get("cloudflare") or {}
     certs = cfg.get("certificates") or []
+    stats = RunStats()
 
     # 0) WAF 实例预检：签发前按各 WAF 部署 (平台, 账号, 地域) 独立发现实例。
     #    waf_zone(cn/intl) 决定 region；同账号的 cn/intl 是两个实例，必须分开查询/缓存。
@@ -1444,7 +1541,7 @@ def process(cfg, force=False):
 
     # 1) 签发所有证书（每张只签一次）
     for c in certs:
-        issue_certificate(c, accounts, cf, force)
+        issue_certificate(c, accounts, cf, force, stats=stats)
 
     # 2) 分组；每组只上传一次。DCDN 按 (证书, 平台, 账号)，WAF 额外带上地域（同账号 cn/intl 是两个实例）。
     dcdn_groups, waf_groups = {}, {}
@@ -1472,13 +1569,16 @@ def process(cfg, force=False):
 
     # 3) 每组上传一次 + 绑定组内所有域名 + 删旧
     for g in dcdn_groups.values():
-        deploy_cert_group(g["cert"], g["account"], g["acc_name"], g["domains"], force)
+        deploy_cert_group(g["cert"], g["account"], g["acc_name"], g["domains"], force, stats=stats)
     if waf_groups:
         log(f"[INFO] 检测到 {len(waf_groups)} 个 WAF 部署组，开始处理")
     for g in waf_groups.values():
         deploy_waf_group(g["cert"], g["account"], g["acc_name"], g["domains"], force,
                          platform=g.get("platform"), waf_id=g.get("waf_id"), region=g.get("region"),
-                         accounts=accounts, cf=cf)
+                         accounts=accounts, cf=cf, stats=stats)
+
+    # 4) 打印执行结果汇总表
+    stats.render()
 
 
 def main():
