@@ -135,6 +135,67 @@ class RunStats:
                 log(f"{name}失败的域名（{len(self.failed[name])}）：{', '.join(self.failed[name])}")
 
 
+# ----------------------------- node_exporter 告警指标 -----------------------------
+PROM_PATH = "/var/lib/node_exporter/textfile_collector/cert-manager.prom"
+PROM_PRODUCT = {"证书签发": "cert", "DCDN": "dcdn", "WAF": "waf"}
+
+
+def _prom_escape(s):
+    """转义 Prometheus label 值里的反斜杠、双引号和换行。"""
+    return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def write_prom_metrics(stats, errors=None):
+    """把本次运行结果写到 node_exporter 的 textfile_collector 目录。
+    有任意失败（含配置校验错误）时 status=1，否则 0，便于告警恢复后自动解除。
+    目录不存在自动创建；先写临时文件再原子替换，避免采集到半截内容。
+    errors 为字符串列表（配置校验失败等）；stats.failed 提供失败域名明细。"""
+    errs = list(errors or [])
+    failed = {p: list(stats.failed[p]) for p in stats.PRODUCTS} if stats else {p: [] for p in PROM_PRODUCT}
+    status = 1 if (errs or any(failed.values())) else 0
+
+    lines = [
+        "# HELP cert_manager_last_run_status 最近一次运行状态：1=有错误，0=正常",
+        "# TYPE cert_manager_last_run_status gauge",
+        f"cert_manager_last_run_status {status}",
+        "# HELP cert_manager_last_run_timestamp 最近一次运行结束的 Unix 时间戳",
+        "# TYPE cert_manager_last_run_timestamp gauge",
+        f"cert_manager_last_run_timestamp {int(time.time())}",
+        "# HELP cert_manager_errors 最近一次各产品失败数（签发按证书，DCDN/WAF 按域名）",
+        "# TYPE cert_manager_errors gauge",
+    ]
+    for p, key in PROM_PRODUCT.items():
+        lines.append(f'cert_manager_errors{{product="{key}"}} {len(failed.get(p, []))}')
+    if errs:
+        lines += [
+            "# HELP cert_manager_config_errors 配置校验失败数",
+            "# TYPE cert_manager_config_errors gauge",
+            f"cert_manager_config_errors {len(errs)}",
+            "# HELP cert_manager_error_detail 配置校验失败详情（1=失败）",
+            "# TYPE cert_manager_error_detail gauge",
+        ]
+        for i, e in enumerate(errs):
+            lines.append(f'cert_manager_error_detail{{index="{i}",msg="{_prom_escape(e)}"}} 1')
+    if any(failed.values()):
+        lines += [
+            "# HELP cert_manager_failed_domain 失败域名明细（1=失败）",
+            "# TYPE cert_manager_failed_domain gauge",
+        ]
+        for p in stats.PRODUCTS:
+            for domain in failed[p]:
+                lines.append(f'cert_manager_failed_domain{{product="{PROM_PRODUCT[p]}",domain="{_prom_escape(domain)}"}} 1')
+
+    tmp = PROM_PATH + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(PROM_PATH), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, PROM_PATH)
+        log(f"[INFO] 已写入告警指标 {PROM_PATH}（status={status}）")
+    except Exception as e:
+        log(f"[WARN] 写入告警指标 {PROM_PATH} 失败: {e}")
+
+
 # ----------------------------- 配置加载 -----------------------------
 def expand_env(obj):
     """递归把配置里的 ${VAR} / $VAR 用环境变量替换。"""
@@ -1604,8 +1665,9 @@ def process(cfg, force=False):
                          platform=g.get("platform"), waf_id=g.get("waf_id"), region=g.get("region"),
                          accounts=accounts, cf=cf, stats=stats)
 
-    # 4) 打印执行结果汇总表
+    # 4) 打印执行结果汇总表，并写 node_exporter 告警指标
     stats.render()
+    return stats
 
 
 def main():
@@ -1649,6 +1711,7 @@ def main():
     for e in errors:
         log(f"[ERROR] 配置校验失败: {e}")
     if errors:
+        write_prom_metrics(None, errors=errors)
         sys.exit(1)
     if args.check:
         for c in cfg["certificates"]:
@@ -1669,7 +1732,8 @@ def main():
         log(f"[OK] 配置校验通过：{len(cfg['certificates'])} 张证书")
         return
     check_acme()
-    process(cfg, force=args.force)
+    stats = process(cfg, force=args.force)
+    write_prom_metrics(stats)
 
 
 if __name__ == "__main__":
