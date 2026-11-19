@@ -104,10 +104,20 @@ class RunStats:
 
     def __init__(self):
         self.data = {p: {"ok": 0, "skip": 0, "fail": 0} for p in self.PRODUCTS}
+        self.failed = {p: [] for p in self.PRODUCTS}
 
-    def add(self, product, status, n=1):
-        if product in self.data and status in self.data[product]:
-            self.data[product][status] += n
+    def add(self, product, status, n=1, names=None):
+        if product not in self.data or status not in self.data[product]:
+            return
+        self.data[product][status] += n
+        # 失败项记录具体域名/证书名，结尾汇总时直接列出来
+        if status == "fail" and names:
+            if isinstance(names, str):
+                names = [names]
+            for item in names:
+                label = item.get("domain") if isinstance(item, dict) else item
+                if label and label not in self.failed[product]:
+                    self.failed[product].append(label)
 
     def render(self):
         log("")
@@ -120,6 +130,9 @@ class RunStats:
             c = self.data[name]
             log(_pad(name, 14) + _pad(c["ok"], 8) + _pad(c["skip"], 8) + _pad(c["fail"], 8))
         log("=" * 42)
+        for name in self.PRODUCTS:
+            if self.failed[name]:
+                log(f"{name}失败的域名（{len(self.failed[name])}）：{', '.join(self.failed[name])}")
 
 
 # ----------------------------- 配置加载 -----------------------------
@@ -581,7 +594,7 @@ def issue_certificate(cert, accounts, cf, force, stats=None):
         if not acc:
             log(f"[ERROR] 证书 {name} dns={dns} 但 DNS 账号 {acc_name} 不在 aliyun_* 分组中，跳过")
             if stats:
-                stats.add("证书签发", "fail")
+                stats.add("证书签发", "fail", names=name)
             return
         # acme.sh 的 dns_ali 插件读取的变量名是「首字母大写的 Ali_Key / Ali_Secret」
         # （不是 ALI_KEY，也不是全大写的 ALI_Key），大小写必须精确匹配，否则凭证读不到 → 签发失败。
@@ -590,7 +603,7 @@ def issue_certificate(cert, accounts, cf, force, stats=None):
         if not (k and s):
             log(f"[ERROR] 证书 {name} 的 DNS 账号 {acc_name} 未配置 access_key/access_secret，跳过签发")
             if stats:
-                stats.add("证书签发", "fail")
+                stats.add("证书签发", "fail", names=name)
             return
         acme_env = {"Ali_Key": k, "Ali_Secret": s}
         # 调试用：打印账号名 + 脱敏 access_key，便于确认实际使用的是哪个 DNS 账号
@@ -608,7 +621,7 @@ def issue_certificate(cert, accounts, cf, force, stats=None):
         if not isinstance(cf_cfg, dict) or not cf_cfg.get("api_token"):
             log(f"[ERROR] 证书 {name} dns=cloudflare 凭证缺失（dns_account={cf_name}），跳过")
             if stats:
-                stats.add("证书签发", "fail")
+                stats.add("证书签发", "fail", names=name)
             return
         acme_env = {"CF_Token": cf_cfg["api_token"]}
         if cf_cfg.get("account_id"):
@@ -619,7 +632,7 @@ def issue_certificate(cert, accounts, cf, force, stats=None):
     else:
         log(f"[ERROR] 证书 {name} 不支持的 dns={dns}，跳过")
         if stats:
-            stats.add("证书签发", "fail")
+            stats.add("证书签发", "fail", names=name)
         return
     domains = cert_domains(cert)
     cert_file, _ = cert_paths(domains[0])
@@ -635,7 +648,7 @@ def issue_certificate(cert, accounts, cf, force, stats=None):
         log(f"[ERROR] acme.sh 签发 {name} 失败（dns_account={cert.get('dns_account')}）："
             f"请检查该 DNS 账号凭证是否正确、是否拥有对应域名的解析权限")
         if stats:
-            stats.add("证书签发", "fail")
+            stats.add("证书签发", "fail", names=name)
         return
     # renew 未到期时 acme.sh 打印 Skipping，本质是没有重新签发，归为「跳过」更贴合语义
     if stats:
@@ -704,7 +717,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force, stats=None):
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过部署")
         if stats:
-            stats.add("DCDN", "fail", len(domains))
+            stats.add("DCDN", "fail", len(domains), names=domains)
         return
     cert_pem = open(cert_file, "r", encoding="utf-8").read()
     key_pem = open(key_file, "r", encoding="utf-8").read()
@@ -760,7 +773,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force, stats=None):
             if not cert_id:
                 log(f"[ERROR] 上传证书到阿里云失败: {e}")
                 if stats:
-                    stats.add("DCDN", "fail", len(to_bind))
+                    stats.add("DCDN", "fail", len(to_bind), names=[d for d, _ in to_bind])
                 return
         if cert_id and not reused:
             log(f"已上传证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
@@ -769,7 +782,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force, stats=None):
     if not cert_id:
         log(f"[ERROR] 上传证书未返回 CertId")
         if stats:
-            stats.add("DCDN", "fail", len(to_bind))
+            stats.add("DCDN", "fail", len(to_bind), names=[d for d, _ in to_bind])
         return
     if reused:
         log(f"复用已存在同名证书 cert_id={cert_id}（账号 {acc_name}，名称 {cert_label}）")
@@ -810,7 +823,7 @@ def deploy_cert_group(cert, account, acc_name, domains, force, stats=None):
             else:
                 log(f"[ERROR] 绑定 DCDN {domain} 失败: {e}")
                 if stats:
-                    stats.add("DCDN", "fail")
+                    stats.add("DCDN", "fail", names=domain)
         log("")  # 每个域名处理完空一行
     # 3) 清理本脚本上传的旧版本（仅 acme_<cert_name>_ 前缀，保留当前这份）
     delete_old_certs(client, f"acme_{safe}_", keep=cert_id)
@@ -825,6 +838,12 @@ def dns_txt_upsert(domain, rr, value, dns_cfg):
     kind, platform, _acc_name, cfg = dns_cfg
     if not isinstance(cfg, dict):
         return False
+    # WAF 接入域名可能是通配符 *.example.com，但 DNS 记录名不允许出现 '*'：
+    # 拼成 verification.*.example.com 会被阿里云拒（InvalidDomainName.Format），
+    # Cloudflare 虽写入成功但 WAF 侧校验失败（DnsTxtVerifyFailed）。
+    # 归属权验证 TXT 统一写到去掉通配符的主域上。
+    domain = domain[2:] if domain.startswith("*.") else domain
+    rr = (rr or "").replace("*.", "")
     # 拼完整记录名：WAF 的 RR 可能是 'verification' 也可能是 'verification.example.com'
     name = rr if (rr == domain or rr.endswith("." + domain)) else f"{rr}.{domain}"
     if kind == "cloudflare":
@@ -1021,9 +1040,12 @@ def cert_dns_cfg(cert, accounts, cf):
     return (kind, dns, acc_name, None)
 
 
-def waf_verify_domain_owner(client, region, iid, domain, dns_cfg, tries=12, interval=10):
+def waf_verify_domain_owner(client, region, iid, domain, dns_cfg, dns_domain=None, tries=12, interval=10):
     """自动完成 WAF 域名归属权验证：DescribeVerifyContent 取 TXT 内容 → 写入 DNS →
-    VerifyDomainOwner 轮询校验。dns_cfg=(kind, platform, acc_name, cfg) 为证书自身 DNS 凭证。返回 True/False。"""
+    VerifyDomainOwner 轮询校验。dns_cfg=(kind, platform, acc_name, cfg) 为证书自身 DNS 凭证。
+    dns_domain=写 TXT 用的主域（证书 name）；与 WAF 接入域名（可能是 *.子域）分开，
+    因为 WAF 返回的 RR 只是前缀（如 verification），应拼在主域下，而不是拼在接入域名下。
+    返回 True/False。"""
     # 1) 取验证内容（可能已验证通过）
     try:
         resp = waf_api(client, "DescribeVerifyContent", {
@@ -1044,11 +1066,12 @@ def waf_verify_domain_owner(client, region, iid, domain, dns_cfg, tries=12, inte
     if not dns_cfg or not dns_cfg[2]:
         log(f"[WARN] WAF {domain} 需要 TXT 归属权验证，但证书无可用 DNS 凭证，跳过")
         return False
-    if not dns_txt_upsert(domain, rr, value, dns_cfg):
-        log(f"[WARN] WAF {domain} 写入验证 TXT 失败，跳过自动验证")
+    verify_domain = dns_domain or domain
+    if not dns_txt_upsert(verify_domain, rr, value, dns_cfg):
+        log(f"[WARN] WAF {domain} 写入验证 TXT {rr}.{verify_domain} 失败，跳过自动验证")
         return False
     # 3) 轮询校验（DNS 生效需时间）
-    log(f"[INFO] WAF {domain} 已写入归属权验证 TXT，等待生效并校验（最多 {tries * interval}s）…")
+    log(f"[INFO] WAF {domain} 已写入归属权验证 TXT {rr}.{verify_domain}，等待生效并校验（最多 {tries * interval}s）…")
     time.sleep(5)
     for i in range(tries):
         try:
@@ -1329,7 +1352,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             f"（证书 waf_id / .env 配 {plat_up}_{acc_up}_WAF_INSTANCE_ID / {acc_up}_WAF_INSTANCE_ID "
             f"或全局 WAF_INSTANCE_ID），跳过该组 WAF 部署")
         if stats:
-            stats.add("WAF", "fail", len(items))
+            stats.add("WAF", "fail", len(items), names=items)
         return
 
     cert_name = cert["name"]
@@ -1338,7 +1361,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
     if not (os.path.exists(cert_file) and os.path.exists(key_file)):
         log(f"[WARN] 证书文件缺失: {cert_file}，跳过 WAF 部署")
         if stats:
-            stats.add("WAF", "fail", len(items))
+            stats.add("WAF", "fail", len(items), names=items)
         return
     cert_pem = open(cert_file, "r", encoding="utf-8").read()
     key_pem = open(key_file, "r", encoding="utf-8").read()
@@ -1388,7 +1411,8 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                         # 归属权未验证：用证书自身的 DNS 凭证加 TXT 完成验证，再重试接入
                         log(f"[INFO] WAF {domain} 归属权未验证，尝试用证书 DNS 账号自动完成 TXT 验证")
                         dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
-                        if waf_verify_domain_owner(client, waf_region, iid, domain, dns_cfg):
+                        if waf_verify_domain_owner(client, waf_region, iid, domain, dns_cfg,
+                                                   dns_domain=cert["name"]):
                             continue  # 验证通过，重试 CreateDomain
                         log(f"[WARN] WAF {domain} 归属权自动验证未成功，本次接入跳过"
                             f"（可在 WAF 控制台手动完成归属权验证后重跑）")
@@ -1397,7 +1421,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                     break
             if not joined:
                 if stats:
-                    stats.add("WAF", "fail")
+                    stats.add("WAF", "fail", names=domain)
                 log("")
                 continue
             time.sleep(3)  # 等接入生效再查详情
@@ -1421,13 +1445,13 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             if not cert_id:
                 log(f"[ERROR] 上传 WAF 证书到阿里云失败: {e}")
                 if stats:
-                    stats.add("WAF", "fail", len(targets))
+                    stats.add("WAF", "fail", len(targets), names=targets)
                 return
         log(f"已上传 WAF 证书 cert_id={cert_id}（账号 {acc_name}，名称 {waf_label}）")
     if not cert_id:
         log("[ERROR] 上传 WAF 证书未返回 CertId")
         if stats:
-            stats.add("WAF", "fail", len(targets))
+            stats.add("WAF", "fail", len(targets), names=targets)
         return
     cert_number = str(cert_id)
     cert_identifier = waf_wait_cert_visible(client, waf_region, iid, cert_number)
@@ -1488,7 +1512,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
         except Exception as e:
             log(f"[ERROR] WAF {domain} 绑定证书失败: {e}")
             if stats:
-                stats.add("WAF", "fail")
+                stats.add("WAF", "fail", names=domain)
         log("")  # 每个域名处理完空一行
 
     # 3) 清理本脚本上传的 WAF 旧证书（仅 acme_waf_<cert_name>_ 前缀）

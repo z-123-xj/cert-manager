@@ -32,6 +32,7 @@ certificates:
         deploy: aliyun_cn
         waf_origin: "8.222.165.188"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+        
   - name: "wysjhck.com"
     dns: aliyun_intl
     domains: ["wysjhck.com", "*.wysjhck.com"]
@@ -503,11 +504,11 @@ certificates:
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
 
 # 源站是8.222.165.188
-  - name: "na229872.vip"
+  - name: "229872.vip"
     dns: aliyun_intl
-    domains: ["na229872.vip", "*.na229872.vip"]
+    domains: ["229872.vip", "*.229872.vip"]
     waf_domains:
-      - domain: "*.na229872.vip"
+      - domain: "*.229872.vip"
         deploy: aliyun_cn
         waf_origin: "8.222.165.188"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
