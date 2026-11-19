@@ -405,11 +405,202 @@ certificates:
         deploy: aliyun_cn
         waf_origin: "47.236.238.77"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
-bgwjsq.com
-chatsjssupergame.com
-jssupergame.com
-mbvidha.com
-vuenslc.com
-vuwkmvn.com
-vyppssm.com
-wumslmv.com
+
+  - name: "bgwjsq.com"
+    dns: aliyun_intl
+    domains: ["bgwjsq.com", "*.bgwjsq.com"]
+    waf_domains:
+      - domain: "*.bgwjsq.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "chatsjssupergame.com"
+    dns: aliyun_intl
+    domains: ["chatsjssupergame.com", "*.chatsjssupergame.com"]
+    waf_domains:
+      - domain: "*.chatsjssupergame.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "jssupergame.com"
+    dns: aliyun_intl
+    domains: ["jssupergame.com", "*.jssupergame.com"]
+    waf_domains:
+      - domain: "*.jssupergame.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "mbvidha.com"
+    dns: aliyun_intl
+    domains: ["mbvidha.com", "*.mbvidha.com"]
+    waf_domains:
+      - domain: "*.mbvidha.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "vuenslc.com"
+    dns: aliyun_intl
+    domains: ["vuenslc.com", "*.vuenslc.com"]
+    waf_domains:
+      - domain: "*.vuenslc.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "vuwkmvn.com"
+    dns: aliyun_intl
+    domains: ["vuwkmvn.com", "*.vuwkmvn.com"]
+    waf_domains:
+      - domain: "*.vuwkmvn.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "vyppssm.com"
+    dns: aliyun_intl
+    domains: ["vyppssm.com", "*.vyppssm.com"]
+    waf_domains:
+      - domain: "*.vyppssm.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "wumslmv.com"
+    dns: aliyun_intl
+    domains: ["wumslmv.com", "*.wumslmv.com"]
+    waf_domains:
+      - domain: "*.wumslmv.com"
+        deploy: aliyun_cn
+        waf_origin: "47.236.238.77"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+# 源站是8.222.165.188
+  - name: "na229872.vip"
+    dns: aliyun_intl
+    domains: ["na229872.vip", "*.na229872.vip"]
+    waf_domains:
+      - domain: "*.na229872.vip"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "7986354.com"
+    dns: aliyun_intl
+    domains: ["7986354.com", "*.7986354.com"]
+    waf_domains:
+      - domain: "*.7986354.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "9966788.com"
+    dns: aliyun_intl
+    domains: ["9966788.com", "*.9966788.com"]
+    waf_domains:
+      - domain: "*.9966788.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "chathsgame.com"
+    dns: aliyun_intl
+    domains: ["chathsgame.com", "*.chathsgame.com"]
+    waf_domains:
+      - domain: "*.chathsgame.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "octhsp.com"
+    dns: aliyun_intl
+    domains: ["octhsp.com", "*.octhsp.com"]
+    waf_domains:
+      - domain: "*.octhsp.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "dhenwxc.com"
+    dns: aliyun_intl
+    domains: ["dhenwxc.com", "*.dhenwxc.com"]
+    waf_domains:
+      - domain: "*.dhenwxc.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "oskwmsx.com"
+    dns: aliyun_intl
+    domains: ["oskwmsx.com", "*.oskwmsx.com"]
+    waf_domains:
+      - domain: "*.oskwmsx.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "pslwejw.com"
+    dns: aliyun_intl
+    domains: ["pslwejw.com", "*.pslwejw.com"]
+    waf_domains:
+      - domain: "*.pslwejw.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "hsphgames.com"
+    dns: aliyun_intl
+    domains: ["hsphgames.com", "*.hsphgames.com"]
+    waf_domains:
+      - domain: "*.hsphgames.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "vjesuiw.com"
+    dns: aliyun_intl
+    domains: ["vjesuiw.com", "*.vjesuiw.com"]
+    waf_domains:
+      - domain: "*.vjesuiw.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "vusdksl.com"
+    dns: aliyun_intl
+    domains: ["vusdksl.com", "*.vusdksl.com"]
+    waf_domains:
+      - domain: "*.vusdksl.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "wkdlcpw.com"
+    dns: aliyun_intl
+    domains: ["wkdlcpw.com", "*.wkdlcpw.com"]
+    waf_domains:
+      - domain: "*.wkdlcpw.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+
+  - name: "wysjhck.com"
+    dns: "aliyun_intl"
+    domains: ["wysjhck.com", "*.wysjhck.com"]
+    waf_domains:
+      - domain: "*.wysjhck.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+
+  - name: "ywjhsxl.com"
+    dns: aliyun_intl
+    domains: ["ywjhsxl.com", "*.ywjhsxl.com"]
+    waf_domains:
+      - domain: "*.ywjhsxl.com"
+        deploy: aliyun_cn
+        waf_origin: "8.222.165.188"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
