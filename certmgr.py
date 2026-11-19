@@ -1319,6 +1319,9 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
     waf_region = region or waf_account_env(acc_name, "REGION", platform) or account.get("region") or "cn-hangzhou"
     client = make_client(account)
     iid = get_waf_instance_id(client, waf_region, acc_name, platform, configured_id=waf_id)
+    if iid:
+        log(f"[INFO] WAF 部署组 {cert['name']} 平台 {platform or '-'} 账号 {acc_name} "
+            f"地域 {waf_region} 使用 WAF 实例 ID={iid}")
     if not iid:
         plat_up = (platform or "").upper()
         acc_up = (acc_name or "").upper()
