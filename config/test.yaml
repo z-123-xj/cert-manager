@@ -1,3 +1,26 @@
+aliyun_cn:                         # 国内站阿里云账号组（下一层账号名可自定义）
+  cn1:
+    access_key: "${CN1_AK}"
+    access_secret: "${CN1_SK}"
+    region: "cn-hangzhou"
+
+aliyun_intl:                       # 国际站阿里云账号组
+  intl1:
+    access_key: "${INTL1_AK}"
+    access_secret: "${INTL1_SK}"
+    region: "ap-southeast-1"
+
+cloudflare:
+  cloudflare1:
+    api_token: "${CF_TOKEN_1}"
+    account_id: "${CF_ACCOUNT_ID_1}"
+
+# 每个域名项自带 deploy（部署平台），账号按该平台分组下第一个账号自动推断
+# （aliyun_cn->cn1，aliyun_intl->intl1）；平台下有多个账号时才需显式写 deploy_account。
+# WAF：waf_id 留空则按该域名 deploy 平台/账号自动发现实例；.env 的 *_WAF_INSTANCE_ID 仅兜底。
+
+certificates:
+  # ---------- 国际站 ----------
   - name: "ywjhsxl.com"
     dns: aliyun_intl
     domains: ["ywjhsxl.com", "*.ywjhsxl.com"]
