@@ -67,6 +67,7 @@ certificates:
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
         cname_domains:
           - "111wuw.bet"
+          - "www.111wuw.bet"
 
   - name: "222wuw.bet"
     dns: cloudflare
@@ -76,6 +77,9 @@ certificates:
         deploy: aliyun_cn
         waf_origin: "47.84.116.133"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "222wuw.bet"
+          - "www.222wuw.bet"
 
   - name: "333wuw.bet"
     dns: cloudflare
