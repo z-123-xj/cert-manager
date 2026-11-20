@@ -1129,18 +1129,19 @@ def dns_cname_upsert(hosts, target, dns_cfg, proxied=True):
     """把一批域名写成 CNAME 指向 target（WAF 分配的 Cname）：存在则改，不存在则加。
     hosts: 完整域名列表（如 ['xxx.com', 'cdn.xxx.com']）；target: CNAME 目标地址。
     dns_cfg: (kind, platform, acc_name, cfg)；proxied: 仅 Cloudflare 生效，是否开橙云代理。
-    返回 (成功数, 失败数, 是否实际发生了变更)。"""
+    返回 (写入数, 跳过数, 失败数, 写入域名列表, 失败域名列表)：
+    写入=实际新增/修改；跳过=已存在且值/代理都一致；失败=写入报错。"""
     kind, platform, acc_name, cfg = dns_cfg
+    hosts = [h for h in (hosts or []) if (h or "").strip()]
     if not isinstance(cfg, dict):
         log(f"[WARN] 写入 CNAME 缺少 DNS 凭证（{acc_name}），跳过")
-        return 0, len(hosts or []), False
+        return 0, 0, len(hosts), [], list(hosts)
     target = (target or "").strip().rstrip(".")
     if not target:
         log("[WARN] WAF 未返回 Cname，跳过 CNAME 解析写入")
-        return 0, len(hosts or []), False
-    ok = fail = 0
-    changed = False
-    for host in hosts or []:
+        return 0, 0, len(hosts), [], list(hosts)
+    changed_hosts, skipped_hosts, failed_hosts = [], [], []
+    for host in hosts:
         host = (host or "").strip().rstrip(".")
         if not host:
             continue
@@ -1155,12 +1156,13 @@ def dns_cname_upsert(hosts, target, dns_cfg, proxied=True):
         except Exception as e:
             log(f"[WARN] 写入 CNAME {host} 异常: {e}")
             done, ch = False, False
-        if done:
-            ok += 1
+        if not done:
+            failed_hosts.append(host)
+        elif ch:
+            changed_hosts.append(host)
         else:
-            fail += 1
-        changed = changed or ch
-    return ok, fail, changed
+            skipped_hosts.append(host)
+    return len(changed_hosts), len(skipped_hosts), len(failed_hosts), changed_hosts, failed_hosts
 
 
 def _cf_cname_upsert(name, value, cfg, proxied=True):
@@ -1789,15 +1791,17 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             if waf_cname:
                 dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
                 proxied = item.get("cname_proxied", True)
-                ok_n, fail_n, cname_changed = dns_cname_upsert(cname_hosts, waf_cname, dns_cfg, proxied=proxied)
-                log(f"[INFO] WAF {domain} CNAME 解析写入完成：成功 {ok_n} / 失败 {fail_n}"
+                ok_n, skip_n, fail_n, changed_hosts, failed_hosts = dns_cname_upsert(
+                    cname_hosts, waf_cname, dns_cfg, proxied=proxied)
+                log(f"[INFO] WAF {domain} CNAME 解析：写入 {ok_n} / 跳过 {skip_n}（已一致）/ 失败 {fail_n}"
                     f"（目标 {waf_cname}，{'橙云' if proxied else '灰云'}）")
                 if stats:
-                    for ch in cname_hosts[:ok_n]:
-                        stats.add("CNAME", "ok", names=ch)
-                    # 失败域名用真实失败的 host：这里按 ok_n 顺序取前 ok_n 个为成功，其余为失败
-                    for ch in cname_hosts[ok_n:]:
-                        stats.add("CNAME", "fail", names=ch)
+                    for h in changed_hosts:
+                        stats.add("CNAME", "ok", names=h)
+                    if skip_n:
+                        stats.add("CNAME", "skip", skip_n)
+                    for h in failed_hosts:
+                        stats.add("CNAME", "fail", names=h)
             else:
                 log(f"[WARN] WAF {domain} 详情未返回 Cname，跳过 {len(cname_hosts)} 条 CNAME 解析写入")
                 if stats:
