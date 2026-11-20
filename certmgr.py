@@ -38,6 +38,7 @@ import yaml
 import shutil
 import urllib.request
 import urllib.parse
+import urllib.error
 
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.request import CommonRequest
@@ -950,8 +951,17 @@ def _cf_api(method, path, token, body=None, params=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 400 的 body 里有 Cloudflare 具体原因（如 CNAME 与 A 冲突），打出来便于定位
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:500]
+        except Exception:
+            pass
+        raise RuntimeError(f"Cloudflare API {method} {path} HTTP {e.code}: {detail}") from e
 
 
 def _cf_txt_upsert(name, value, cfg):
@@ -1161,6 +1171,15 @@ def _cf_cname_upsert(name, value, cfg):
     if hit:
         log(f"[INFO] Cloudflare CNAME {name} 已存在且值一致，跳过")
         return True
+    # CNAME 不能与 A/AAAA 同名共存：必须先删掉冲突记录，再写 CNAME，
+    # 否则 Cloudflare 直接返回 400（CNAME 与 A 记录冲突），CNAME 写不进去。
+    for rtype in ("A", "AAAA"):
+        resp = _cf_api("GET", f"/zones/{zid}/dns_records", token,
+                       params={"type": rtype, "name": name, "per_page": 100})
+        for r in resp.get("result") or []:
+            if (r.get("name") or "").rstrip(".") == name:
+                _cf_api("DELETE", f"/zones/{zid}/dns_records/{r['id']}", token)
+                log(f"[INFO] Cloudflare 删除与 CNAME 冲突的 {rtype} 记录 {name} -> {r.get('content')}")
     if records:
         rid = records[0]["id"]
         _cf_api("PATCH", f"/zones/{zid}/dns_records/{rid}", token,
@@ -1170,14 +1189,6 @@ def _cf_cname_upsert(name, value, cfg):
         _cf_api("POST", f"/zones/{zid}/dns_records", token,
                 body={"type": "CNAME", "name": name, "content": value, "ttl": 1})
         log(f"[INFO] Cloudflare CNAME {name} 已添加 -> {value}")
-    # CNAME 不能与 A/AAAA 同名共存，删掉冲突记录才能生效（否则 Cloudflare 会拒绝或覆盖）
-    for rtype in ("A", "AAAA"):
-        resp = _cf_api("GET", f"/zones/{zid}/dns_records", token,
-                       params={"type": rtype, "name": name, "per_page": 100})
-        for r in resp.get("result") or []:
-            if (r.get("name") or "").rstrip(".") == name:
-                _cf_api("DELETE", f"/zones/{zid}/dns_records/{r['id']}", token)
-                log(f"[INFO] Cloudflare 删除与 CNAME 冲突的 {rtype} 记录 {name} -> {r.get('content')}")
     return True
 
 
@@ -1204,17 +1215,7 @@ def _ali_cname_upsert(host, target, cfg, acc_name, platform):
         if hit:
             log(f"[INFO] 阿里云 DNS CNAME {host} 已存在且值一致，跳过（{endpoint}）")
             return True
-        if records:
-            _ali_dns_call(client, endpoint, "UpdateDomainRecord", {
-                "RecordId": records[0]["RecordId"], "RR": rr, "Type": "CNAME", "Value": target,
-            })
-            log(f"[INFO] 阿里云 DNS CNAME {host} 已存在，更新为 {target}（{endpoint}）")
-        else:
-            _ali_dns_call(client, endpoint, "AddDomainRecord", {
-                "DomainName": zone, "RR": rr, "Type": "CNAME", "Value": target,
-            })
-            log(f"[INFO] 阿里云 DNS CNAME {host} 已添加 -> {target}（{endpoint}）")
-        # CNAME 不能与 A/AAAA 同名共存，删掉冲突记录才能生效
+        # CNAME 不能与 A/AAAA 同名共存：必须先删冲突记录再写 CNAME，否则 AddDomainRecord 会报冲突
         for rtype in ("A", "AAAA"):
             ar = _ali_dns_call(client, endpoint, "DescribeDomainRecords", {
                 "DomainName": zone, "RRKeyWord": rr, "Type": rtype, "PageSize": 100,
@@ -1225,6 +1226,16 @@ def _ali_cname_upsert(host, target, cfg, acc_name, platform):
                         "RecordId": rec["RecordId"],
                     })
                     log(f"[INFO] 阿里云 DNS 删除与 CNAME 冲突的 {rtype} 记录 {host} -> {rec.get('Value')}（{endpoint}）")
+        if records:
+            _ali_dns_call(client, endpoint, "UpdateDomainRecord", {
+                "RecordId": records[0]["RecordId"], "RR": rr, "Type": "CNAME", "Value": target,
+            })
+            log(f"[INFO] 阿里云 DNS CNAME {host} 已存在，更新为 {target}（{endpoint}）")
+        else:
+            _ali_dns_call(client, endpoint, "AddDomainRecord", {
+                "DomainName": zone, "RR": rr, "Type": "CNAME", "Value": target,
+            })
+            log(f"[INFO] 阿里云 DNS CNAME {host} 已添加 -> {target}（{endpoint}）")
         return True
     except Exception as e:
         log(f"[WARN] 阿里云 DNS 写入 CNAME {host} 失败（{endpoint}）: {e}")
