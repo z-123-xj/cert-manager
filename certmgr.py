@@ -598,19 +598,38 @@ def make_client(account):
 
 
 # ----------------------------- 删除旧证书 -----------------------------
+def list_all_certs(client, page_size=100, max_pages=50):
+    """列出 CAS 中全部证书（翻页）。该接口即使设 ShowSize=500 也只返回每页 100 条，
+    必须逐页拉取，否则证书超过 100 张时按名称查找会漏（导致 NameRepeat 误判）。
+    返回证书 dict 列表；兼容 CertificateList 为 list 或 {Certificate:[...]}，字段名大小写。"""
+    all_certs = []
+    page = 1
+    while page <= max_pages:
+        req = DescribeUserCertificateListRequest()
+        req.set_accept_format("json")
+        req.set_CurrentPage(page)
+        req.set_ShowSize(page_size)
+        try:
+            resp = json.loads(client.do_action_with_exception(req))
+        except Exception as e:
+            log(f"[WARN] 列出证书列表第 {page} 页失败: {e}")
+            break
+        raw = resp.get("CertificateList") or resp.get("CertificateListModel") or resp.get("Certificate") or []
+        certs = raw if isinstance(raw, list) else (raw.get("Certificate", []) if isinstance(raw, dict) else [])
+        all_certs.extend(certs)
+        # 取不满一页说明到末页；也兼容返回 TotalCount 的情况
+        if len(certs) < page_size:
+            break
+        total = resp.get("TotalCount") or (raw.get("TotalCount") if isinstance(raw, dict) else None)
+        if total and len(all_certs) >= int(total):
+            break
+        page += 1
+    return all_certs
+
+
 def delete_old_certs(client, prefix, keep):
     """删除指定名称前缀的旧证书（仅本脚本 acme_ 前缀管理的），保留 keep 那一份。"""
-    req = DescribeUserCertificateListRequest()
-    req.set_accept_format("json")
-    req.set_CurrentPage(1)
-    req.set_ShowSize(100)
-    try:
-        resp = json.loads(client.do_action_with_exception(req))
-    except Exception as e:
-        log(f"[WARN] 列出证书失败: {e}")
-        return
-    raw = resp.get("CertificateList", {})
-    certs = raw.get("Certificate", []) if isinstance(raw, dict) else (raw or [])
+    certs = list_all_certs(client)
     for c in certs:
         name = c.get("Name", "")
         cid = c.get("CertId")
@@ -626,31 +645,15 @@ def delete_old_certs(client, prefix, keep):
 
 
 def find_cert_id_by_name(client, name):
-    """在 CAS 中按证书名称查找已存在的 CertId；找不到返回 None。
+    """在 CAS 中按证书名称查找已存在的 CertId（翻页查全部）；找不到返回 None。
     兼容不同返回结构与字段命名（含小写 name/id）；未匹配时打印诊断摘要。"""
-    req = DescribeUserCertificateListRequest()
-    req.set_accept_format("json")
-    for setter, val in (("set_ShowSize", 500), ("set_PageSize", 500),
-                        ("set_CurrentPage", 1), ("set_PageNo", 1)):
-        if hasattr(req, setter):
-            try:
-                getattr(req, setter)(val)
-            except Exception:
-                pass
-    try:
-        resp = json.loads(client.do_action_with_exception(req))
-    except Exception as e:
-        log(f"[WARN] 查询证书列表失败: {e}")
-        return None
-    # CertificateList 可能是 list，也可能是 {Certificate:[...]}，兼容两者
-    cl = resp.get("CertificateList") or resp.get("CertificateListModel") or resp.get("Certificate") or []
-    certs = cl if isinstance(cl, list) else (cl.get("Certificate", []) if isinstance(cl, dict) else [])
+    certs = list_all_certs(client)
     for c in certs:
         cname = (c.get("name") or c.get("Name") or c.get("certName")
                  or c.get("CertName") or c.get("CommonName"))
         if cname == name:
             return c.get("id") or c.get("CertId") or c.get("certId")
-    log(f"[DEBUG] 列表未匹配 name={name}；共 {len(certs)} 张")
+    log(f"[DEBUG] 列表未匹配 name={name}；共 {len(certs)} 张（已翻页查全部）")
     return None
 
 

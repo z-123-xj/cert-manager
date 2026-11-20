@@ -611,3 +611,124 @@ certificates:
           - "callreqsg.com"
           - "www.callreqsg.com"
           - "api.callreqsg.com"
+
+  # ===== 新增：nginx vhost 对照发现未加 WAF 的域名（主域 aliyun_intl，源站 47.84.116.133）=====
+  - name: "334567.bet"
+    dns: aliyun_intl
+    domains: ["334567.bet", "*.334567.bet"]
+    waf_domains:
+      - domain: "*.334567.bet"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "334567.bet"
+          - "www.334567.bet"
+
+  - name: "557895.com"
+    dns: aliyun_intl
+    domains: ["557895.com", "*.557895.com"]
+    waf_domains:
+      - domain: "*.557895.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "557895.com"
+          - "www.557895.com"
+
+  - name: "674432.com"
+    dns: aliyun_intl
+    domains: ["674432.com", "*.674432.com"]
+    waf_domains:
+      - domain: "*.674432.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "674432.com"
+          - "www.674432.com"
+
+  - name: "flbbwbg.com"
+    dns: aliyun_intl
+    domains: ["flbbwbg.com", "*.flbbwbg.com"]
+    waf_domains:
+      - domain: "*.flbbwbg.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "flbbwbg.com"
+          - "www.flbbwbg.com"
+
+  - name: "hscfreq.com"
+    dns: cloudflare
+    domains: ["hscfreq.com", "*.hscfreq.com"]
+    waf_domains:
+      - domain: "*.hscfreq.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "hscfreq.com"
+          - "www.hscfreq.com"
+
+  - name: "newapione.com"
+    dns: aliyun_intl
+    domains: ["newapione.com", "*.newapione.com"]
+    waf_domains:
+      - domain: "*.newapione.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "newapione.com"
+          - "www.newapione.com"
+
+  - name: "sluckyjili.com"
+    dns: aliyun_intl
+    domains: ["sluckyjili.com", "*.sluckyjili.com"]
+    waf_domains:
+      - domain: "*.sluckyjili.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "sluckyjili.com"
+          - "www.sluckyjili.com"
+
+  - name: "wishyouwin77.com"
+    dns: aliyun_intl
+    domains: ["wishyouwin77.com", "*.wishyouwin77.com"]
+    waf_domains:
+      - domain: "*.wishyouwin77.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "wishyouwin77.com"
+          - "www.wishyouwin77.com"
+
+  - name: "bluck.ph"
+    dns: cloudflare
+    domains: ["bluck.ph", "*.bluck.ph"]
+    waf_domains:
+      - domain: "*.bluck.ph"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "bluck.ph"
+          - "www.bluck.ph"
+
+  - name: "wconnbw.com"
+    dns: aliyun_intl
+    domains: ["wconnbw.com", "*.wconnbw.com"]
+    waf_domains:
+      - domain: "*.wconnbw.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "wconnbw.com"
+          - "www.wconnbw.com"
