@@ -136,7 +136,7 @@ class RunStats:
 
 
 # ----------------------------- node_exporter 告警指标 -----------------------------
-PROM_PATH = "/var/lib/node_exporter/textfile_collector/cert-manager.prom"
+PROM_DIR = "/var/lib/node_exporter/textfile_collector"
 PROM_PRODUCT = {"证书签发": "cert", "DCDN": "dcdn", "WAF": "waf"}
 
 
@@ -145,37 +145,47 @@ def _prom_escape(s):
     return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def write_prom_metrics(stats, errors=None):
+def config_name_of(path):
+    """从 --config 路径取配置文件名（去目录、去扩展名），用作指标标签和文件名后缀。
+    如 /data/cert-manager/config/dcdn.yaml -> dcdn。"""
+    return os.path.splitext(os.path.basename(path or ""))[0] or "default"
+
+
+def write_prom_metrics(stats, errors=None, config_name="default"):
     """把本次运行结果写到 node_exporter 的 textfile_collector 目录。
+    每个配置文件写独立文件（cert-manager_<config_name>.prom）并带 config 标签，
+    多个配置（如 dcdn/waf 分开跑）互不覆盖。
     有任意失败（含配置校验错误）时 status=1，否则 0，便于告警恢复后自动解除。
     目录不存在自动创建；先写临时文件再原子替换，避免采集到半截内容。
     errors 为字符串列表（配置校验失败等）；stats.failed 提供失败域名明细。"""
     errs = list(errors or [])
     failed = {p: list(stats.failed[p]) for p in stats.PRODUCTS} if stats else {p: [] for p in PROM_PRODUCT}
     status = 1 if (errs or any(failed.values())) else 0
+    cfg_label = _prom_escape(config_name)
+    prom_path = os.path.join(PROM_DIR, f"cert-manager_{cfg_label}.prom")
 
     lines = [
         "# HELP cert_manager_last_run_status 最近一次运行状态：1=有错误，0=正常",
         "# TYPE cert_manager_last_run_status gauge",
-        f"cert_manager_last_run_status {status}",
+        f'cert_manager_last_run_status{{config="{cfg_label}"}} {status}',
         "# HELP cert_manager_last_run_timestamp 最近一次运行结束的 Unix 时间戳",
         "# TYPE cert_manager_last_run_timestamp gauge",
-        f"cert_manager_last_run_timestamp {int(time.time())}",
+        f'cert_manager_last_run_timestamp{{config="{cfg_label}"}} {int(time.time())}',
         "# HELP cert_manager_errors 最近一次各产品失败数（签发按证书，DCDN/WAF 按域名）",
         "# TYPE cert_manager_errors gauge",
     ]
     for p, key in PROM_PRODUCT.items():
-        lines.append(f'cert_manager_errors{{product="{key}"}} {len(failed.get(p, []))}')
+        lines.append(f'cert_manager_errors{{config="{cfg_label}",product="{key}"}} {len(failed.get(p, []))}')
     if errs:
         lines += [
             "# HELP cert_manager_config_errors 配置校验失败数",
             "# TYPE cert_manager_config_errors gauge",
-            f"cert_manager_config_errors {len(errs)}",
+            f'cert_manager_config_errors{{config="{cfg_label}"}} {len(errs)}',
             "# HELP cert_manager_error_detail 配置校验失败详情（1=失败）",
             "# TYPE cert_manager_error_detail gauge",
         ]
         for i, e in enumerate(errs):
-            lines.append(f'cert_manager_error_detail{{index="{i}",msg="{_prom_escape(e)}"}} 1')
+            lines.append(f'cert_manager_error_detail{{config="{cfg_label}",index="{i}",msg="{_prom_escape(e)}"}} 1')
     if any(failed.values()):
         lines += [
             "# HELP cert_manager_failed_domain 失败域名明细（1=失败）",
@@ -183,17 +193,17 @@ def write_prom_metrics(stats, errors=None):
         ]
         for p in stats.PRODUCTS:
             for domain in failed[p]:
-                lines.append(f'cert_manager_failed_domain{{product="{PROM_PRODUCT[p]}",domain="{_prom_escape(domain)}"}} 1')
+                lines.append(f'cert_manager_failed_domain{{config="{cfg_label}",product="{PROM_PRODUCT[p]}",domain="{_prom_escape(domain)}"}} 1')
 
-    tmp = PROM_PATH + ".tmp"
+    tmp = prom_path + ".tmp"
     try:
-        os.makedirs(os.path.dirname(PROM_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(prom_path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
-        os.replace(tmp, PROM_PATH)
-        log(f"[INFO] 已写入告警指标 {PROM_PATH}（status={status}）")
+        os.replace(tmp, prom_path)
+        log(f"[INFO] 已写入告警指标 {prom_path}（config={config_name}, status={status}）")
     except Exception as e:
-        log(f"[WARN] 写入告警指标 {PROM_PATH} 失败: {e}")
+        log(f"[WARN] 写入告警指标 {prom_path} 失败: {e}")
 
 
 # ----------------------------- 配置加载 -----------------------------
@@ -315,6 +325,13 @@ def deploy_items(items, default_account, with_origin=False, default_origin=None,
             row["waf_id"] = item_waf_id or ((default_waf_id or "").strip() if same_target else "")
             item_zone = (item.get("waf_zone") or "").strip() if isinstance(item, dict) else ""
             row["waf_zone"] = item_zone or (default_waf_zone or "").strip()
+            # cname_domains: 需要解析到 WAF 的域名列表（如 xxx.com / cdn.xxx.com）。
+            # 接入成功后取 WAF 分配的 Cname，把这些域名写成 CNAME 记录（存在则改，不存在则加）。
+            if isinstance(item, dict):
+                cname_hosts = [str(d).strip() for d in _as_list(item.get("cname_domains"))
+                               if str(d).strip()]
+                if cname_hosts:
+                    row["cname_domains"] = cname_hosts
         out.append(row)
     return out
 
@@ -1030,6 +1047,159 @@ def _ali_txt_upsert(domain, name, value, cfg, acc_name, platform):
         return False
 
 
+def _ali_dns_zones(client, endpoint, cfg):
+    """列出阿里云 DNS 账号下所有托管主域，返回域名字符串列表（翻页）。
+    用于把完整域名（如 cdn.xxx.com）拆成 DomainName=xxx.com + RR=cdn。"""
+    domains, page = [], 1
+    try:
+        while True:
+            resp = _ali_dns_call(client, endpoint, "DescribeDomains", {
+                "PageNumber": page, "PageSize": 100,
+            })
+            items = ((resp.get("Domains") or {}).get("Domain") or [])
+            for d in items:
+                dn = d.get("DomainName") if isinstance(d, dict) else None
+                if dn:
+                    domains.append(dn.rstrip("."))
+            total = int(resp.get("TotalCount") or 0)
+            if page * 100 >= total or not items:
+                break
+            page += 1
+    except Exception as e:
+        log(f"[WARN] 列出阿里云 DNS 托管域失败（{endpoint}）: {e}")
+    return domains
+
+
+def _split_host_zone(host, zones):
+    """把完整域名拆成 (zone, rr)：zone 取最长匹配的托管主域，rr 为剩余部分（主域本身为 @）。
+    未匹配到任何 zone 时返回 (None, None)。"""
+    host = (host or "").strip().rstrip(".")
+    best = None
+    for z in zones or []:
+        z = (z or "").rstrip(".")
+        if z and (host == z or host.endswith("." + z)):
+            if best is None or len(z) > len(best):
+                best = z
+    if not best:
+        return None, None
+    if host == best:
+        return best, "@"
+    return best, host[:-(len(best) + 1)]
+
+
+def dns_cname_upsert(hosts, target, dns_cfg):
+    """把一批域名写成 CNAME 指向 target（WAF 分配的 Cname）：存在则改，不存在则加。
+    hosts: 完整域名列表（如 ['xxx.com', 'cdn.xxx.com']）；target: CNAME 目标地址。
+    dns_cfg: (kind, platform, acc_name, cfg)。返回 (成功数, 失败数)。"""
+    kind, platform, acc_name, cfg = dns_cfg
+    if not isinstance(cfg, dict):
+        log(f"[WARN] 写入 CNAME 缺少 DNS 凭证（{acc_name}），跳过")
+        return 0, len(hosts or [])
+    target = (target or "").strip().rstrip(".")
+    if not target:
+        log("[WARN] WAF 未返回 Cname，跳过 CNAME 解析写入")
+        return 0, len(hosts or [])
+    ok = fail = 0
+    for host in hosts or []:
+        host = (host or "").strip().rstrip(".")
+        if not host:
+            continue
+        try:
+            if kind == "cloudflare":
+                done = _cf_cname_upsert(host, target, cfg)
+            elif kind == "aliyun":
+                done = _ali_cname_upsert(host, target, cfg, acc_name, platform)
+            else:
+                log(f"[WARN] 写入 CNAME 不支持的 DNS 平台 {kind}")
+                done = False
+        except Exception as e:
+            log(f"[WARN] 写入 CNAME {host} 异常: {e}")
+            done = False
+        if done:
+            ok += 1
+        else:
+            fail += 1
+    return ok, fail
+
+
+def _cf_cname_upsert(name, value, cfg):
+    """Cloudflare 写 CNAME：逐级找 zone，按 name+type 精确匹配后改/加。"""
+    token = cfg.get("api_token")
+    if not token:
+        log("[WARN] Cloudflare 写入 CNAME 缺少 api_token")
+        return False
+    zone_name = name.split(".", 1)[1] if "." in name else name
+    zone = None
+    candidate = zone_name
+    while candidate:
+        resp = _cf_api("GET", "/zones", token, params={"name": candidate, "per_page": 1})
+        if resp.get("success") and resp.get("result"):
+            zone = resp["result"][0]
+            break
+        candidate = candidate.split(".", 1)[1] if "." in candidate else ""
+    if not zone:
+        log(f"[WARN] Cloudflare 找不到 {name} 对应的 zone，无法自动加 CNAME")
+        return False
+    zid = zone["id"]
+    resp = _cf_api("GET", f"/zones/{zid}/dns_records", token,
+                   params={"type": "CNAME", "name": name, "per_page": 100})
+    records = resp.get("result") or []
+    records = [r for r in records if (r.get("name") or "").rstrip(".") == name]
+    hit = next((r for r in records if (r.get("content") or "").rstrip(".") == value), None)
+    if hit:
+        log(f"[INFO] Cloudflare CNAME {name} 已存在且值一致，跳过")
+        return True
+    if records:
+        rid = records[0]["id"]
+        _cf_api("PATCH", f"/zones/{zid}/dns_records/{rid}", token,
+                body={"type": "CNAME", "name": name, "content": value, "ttl": 1})
+        log(f"[INFO] Cloudflare CNAME {name} 已存在，更新为 {value}")
+    else:
+        _cf_api("POST", f"/zones/{zid}/dns_records", token,
+                body={"type": "CNAME", "name": name, "content": value, "ttl": 1})
+        log(f"[INFO] Cloudflare CNAME {name} 已添加 -> {value}")
+    return True
+
+
+def _ali_cname_upsert(host, target, cfg, acc_name, platform):
+    """阿里云 DNS 写 CNAME：先列托管域拆 zone/RR，再精确匹配后改/加。"""
+    k, s = cfg.get("access_key"), cfg.get("access_secret")
+    if not (k and s):
+        log(f"[WARN] DNS 账号 {acc_name} 缺 access_key/access_secret，无法自动加 CNAME")
+        return False
+    endpoint, region = _ali_dns_endpoint(platform, cfg)
+    try:
+        client = AcsClient(k, s, region)
+        zones = _ali_dns_zones(client, endpoint, cfg)
+        zone, rr = _split_host_zone(host, zones)
+        if not zone:
+            log(f"[WARN] 阿里云 DNS 账号 {acc_name} 下找不到 {host} 的托管主域，无法加 CNAME")
+            return False
+        recs_resp = _ali_dns_call(client, endpoint, "DescribeDomainRecords", {
+            "DomainName": zone, "RRKeyWord": rr, "Type": "CNAME", "PageSize": 100,
+        })
+        records = ((recs_resp.get("DomainRecords") or {}).get("Record") or [])
+        records = [r for r in records if (r.get("RR") or "") == rr]
+        hit = next((r for r in records if (r.get("Value") or "").rstrip(".") == target), None)
+        if hit:
+            log(f"[INFO] 阿里云 DNS CNAME {host} 已存在且值一致，跳过（{endpoint}）")
+            return True
+        if records:
+            _ali_dns_call(client, endpoint, "UpdateDomainRecord", {
+                "RecordId": records[0]["RecordId"], "RR": rr, "Type": "CNAME", "Value": target,
+            })
+            log(f"[INFO] 阿里云 DNS CNAME {host} 已存在，更新为 {target}（{endpoint}）")
+        else:
+            _ali_dns_call(client, endpoint, "AddDomainRecord", {
+                "DomainName": zone, "RR": rr, "Type": "CNAME", "Value": target,
+            })
+            log(f"[INFO] 阿里云 DNS CNAME {host} 已添加 -> {target}（{endpoint}）")
+        return True
+    except Exception as e:
+        log(f"[WARN] 阿里云 DNS 写入 CNAME {host} 失败（{endpoint}）: {e}")
+        return False
+
+
 # ----------------------------- WAF 3.0 部署 -----------------------------
 # WAF 3.0 用 RPC 风格 OpenAPI（版本 2021-10-01，endpoint wafopenapi.<region>.aliyuncs.com）。
 # 与 DCDN 不同：证书以「引用 CertId」方式绑定，ModifyDomainCert 只换证书不动端口/转发；
@@ -1317,6 +1487,17 @@ def waf_backends(redirect):
     return out
 
 
+def waf_origin_changed(detail, item):
+    """判断配置源站是否与云端不一致（仅当配了 waf_origin 时才有意义）。
+    返回 (是否不一致, 云端源站列表, 配置源站列表)。顺序不敏感，去重后按集合比较。"""
+    configured = list(item.get("origin") or [])
+    cloud = waf_backends((detail.get("Redirect") or {}))
+    if not configured:
+        return False, cloud, configured
+    changed = set(configured) != set(cloud)
+    return changed, cloud, configured
+
+
 def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identifier):
     """用 ModifyDomain 显式开启 443 并绑定证书：必须带完整 Listen + Redirect，
     并保留云端现有回源，否则会冲掉已配置的转发规则。返回实际使用的源站列表。"""
@@ -1334,8 +1515,8 @@ def waf_open_443_and_bind(client, region, iid, domain, detail, item, cert_identi
     new_listen["EnableTLSv3"] = False
     redirect_in = detail.get("Redirect") or {}
     new_redirect = {k: redirect_in[k] for k in WAF_REDIRECT_FIELDS if k in redirect_in}
-    # 优先用云端现有回源，其次用配置的 origin 源站，避免开 443 时冲掉回源
-    backends = waf_backends(redirect_in) or item.get("origin") or []
+    # 配了 waf_origin 就以配置为准覆盖云端源站（便于批量迁移）；没配才用云端现有回源。
+    backends = item.get("origin") or waf_backends(redirect_in) or []
     new_redirect["Backends"] = backends
     new_redirect.setdefault("Loadbalance", "iphash")
     params = {
@@ -1528,22 +1709,44 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                 stats.add("WAF", "skip")
             log("")
             continue
+        # 0.5) CNAME 解析接入：若该域名项配了 cname_domains，把列出的域名 CNAME 到
+        #      WAF 分配的 Cname（DescribeDomainDetail.Cname），存在则改、不存在则加。
+        #      用证书自身的 DNS 账号（与归属权 TXT 验证一致），在 443 绑定前做且幂等。
+        cname_hosts = item.get("cname_domains") or []
+        if cname_hosts:
+            waf_cname = (detail.get("Cname") or "").strip()
+            if waf_cname:
+                dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
+                ok_n, fail_n = dns_cname_upsert(cname_hosts, waf_cname, dns_cfg)
+                log(f"[INFO] WAF {domain} CNAME 解析写入完成：成功 {ok_n} / 失败 {fail_n}（目标 {waf_cname}）")
+            else:
+                log(f"[WARN] WAF {domain} 详情未返回 Cname，跳过 {len(cname_hosts)} 条 CNAME 解析写入")
         listen = detail["Listen"] or {}
         https_ports = listen.get("HttpsPorts") or []
         cur_cert = listen.get("CertId") or (detail.get("CertDetail") or {}).get("Id")
         same_cert = waf_cert_number(cur_cert) == cert_number
         has_443 = 443 in https_ports or "443" in [str(p) for p in https_ports]
+        # 配了 waf_origin 才比较源站；没配则保持云端现状，不触发变更。
+        origin_changed, cloud_backends, configured_origin = waf_origin_changed(detail, item)
         log(f"[DEBUG] WAF {domain} HttpsPorts={https_ports} has_443={has_443} "
-            f"当前证书={cur_cert} 目标证书={cert_number} same_cert={same_cert}")
+            f"当前证书={cur_cert} 目标证书={cert_number} same_cert={same_cert} "
+            f"源站变更={origin_changed} 云端={cloud_backends} 配置={configured_origin}")
 
-        if has_443 and same_cert and not force:
-            log(f"[SKIP] WAF {domain} 443 已开且证书一致（CertId={cur_cert}），跳过")
+        # 443 已开、证书一致、且源站无需变更才跳过（原来不看源站，导致改 waf_origin 不生效）
+        if has_443 and same_cert and not origin_changed and not force:
+            log(f"[SKIP] WAF {domain} 443 已开且证书一致、源站一致（CertId={cur_cert}），跳过")
             if stats:
                 stats.add("WAF", "skip")
             log("")
             continue
         try:
-            if has_443:
+            # 源站需要变更时必须走 ModifyDomain（带完整 Listen+Redirect），ModifyDomainCert 只换证书不碰源站
+            if origin_changed:
+                backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
+                log(f"[BIND] WAF {domain} 源站按配置覆盖 {cloud_backends} -> {backends}，绑定 {waf_label}")
+                if stats:
+                    stats.add("WAF", "ok")
+            elif has_443:
                 try:
                     # 只换证书引用，不碰端口/转发（ModifyDomainCert 无 HttpsPorts 参数）
                     waf_api_retry_processing(client, "ModifyDomainCert", {
@@ -1679,6 +1882,7 @@ def main():
                     help="列出各账号下的 WAF 实例详情（供填写 WAF_INSTANCE_ID），不签发/部署")
     ap.add_argument("--account", help="配合 --list-waf-instances，只查指定账号（如 cn1）")
     args = ap.parse_args()
+    config_name = config_name_of(args.config)
     if not os.path.exists(args.config):
         log(f"[ERROR] 配置文件不存在: {args.config}")
         sys.exit(1)
@@ -1711,7 +1915,7 @@ def main():
     for e in errors:
         log(f"[ERROR] 配置校验失败: {e}")
     if errors:
-        write_prom_metrics(None, errors=errors)
+        write_prom_metrics(None, errors=errors, config_name=config_name)
         sys.exit(1)
     if args.check:
         for c in cfg["certificates"]:
@@ -1733,7 +1937,7 @@ def main():
         return
     check_acme()
     stats = process(cfg, force=args.force)
-    write_prom_metrics(stats)
+    write_prom_metrics(stats, config_name=config_name)
 
 
 if __name__ == "__main__":
