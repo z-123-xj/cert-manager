@@ -1647,6 +1647,34 @@ def waf_wait_cert_visible(client, region, iid, cert_number, tries=6, interval=10
     return str(cert_number)
 
 
+def write_waf_cname(cert, item, detail, accounts, cf, stats):
+    """WAF 就绪后才写 CNAME：把 cname_domains 列出的域名 CNAME 到 WAF 分配的 Cname。
+    用证书自身的 DNS 账号（与归属权 TXT 验证一致）；值/代理都一致则跳过（幂等）。"""
+    cname_hosts = item.get("cname_domains") or []
+    if not cname_hosts:
+        return
+    domain = item.get("domain", "")
+    waf_cname = (detail.get("Cname") or "").strip()
+    if not waf_cname:
+        log(f"[WARN] WAF {domain} 详情未返回 Cname，跳过 {len(cname_hosts)} 条 CNAME 解析写入")
+        if stats:
+            stats.add("CNAME", "fail", len(cname_hosts), names=cname_hosts)
+        return
+    dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
+    proxied = item.get("cname_proxied", True)
+    ok_n, skip_n, fail_n, changed_hosts, failed_hosts = dns_cname_upsert(
+        cname_hosts, waf_cname, dns_cfg, proxied=proxied)
+    log(f"[INFO] WAF {domain} CNAME 解析：写入 {ok_n} / 跳过 {skip_n}（已一致）/ 失败 {fail_n}"
+        f"（目标 {waf_cname}，{'橙云' if proxied else '灰云'}）")
+    if stats:
+        for h in changed_hosts:
+            stats.add("CNAME", "ok", names=h)
+        if skip_n:
+            stats.add("CNAME", "skip", skip_n)
+        for h in failed_hosts:
+            stats.add("CNAME", "fail", names=h)
+
+
 def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_id=None, region=None,
                      accounts=None, cf=None, stats=None):
     """WAF 3.0 部署：证书换名上传到 CAS（acme_waf_ 前缀，避开 DCDN 同名冲突），
@@ -1782,30 +1810,6 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                 stats.add("WAF", "skip")
             log("")
             continue
-        # 0.5) CNAME 解析接入：若该域名项配了 cname_domains，把列出的域名 CNAME 到
-        #      WAF 分配的 Cname（DescribeDomainDetail.Cname），存在则改、不存在则加。
-        #      用证书自身的 DNS 账号（与归属权 TXT 验证一致），在 443 绑定前做且幂等。
-        cname_hosts = item.get("cname_domains") or []
-        if cname_hosts:
-            waf_cname = (detail.get("Cname") or "").strip()
-            if waf_cname:
-                dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
-                proxied = item.get("cname_proxied", True)
-                ok_n, skip_n, fail_n, changed_hosts, failed_hosts = dns_cname_upsert(
-                    cname_hosts, waf_cname, dns_cfg, proxied=proxied)
-                log(f"[INFO] WAF {domain} CNAME 解析：写入 {ok_n} / 跳过 {skip_n}（已一致）/ 失败 {fail_n}"
-                    f"（目标 {waf_cname}，{'橙云' if proxied else '灰云'}）")
-                if stats:
-                    for h in changed_hosts:
-                        stats.add("CNAME", "ok", names=h)
-                    if skip_n:
-                        stats.add("CNAME", "skip", skip_n)
-                    for h in failed_hosts:
-                        stats.add("CNAME", "fail", names=h)
-            else:
-                log(f"[WARN] WAF {domain} 详情未返回 Cname，跳过 {len(cname_hosts)} 条 CNAME 解析写入")
-                if stats:
-                    stats.add("CNAME", "fail", len(cname_hosts), names=cname_hosts)
         listen = detail["Listen"] or {}
         https_ports = listen.get("HttpsPorts") or []
         cur_cert = listen.get("CertId") or (detail.get("CertDetail") or {}).get("Id")
@@ -1822,8 +1826,11 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             log(f"[SKIP] WAF {domain} 443 已开且证书一致、源站一致（CertId={cur_cert}），跳过")
             if stats:
                 stats.add("WAF", "skip")
+            # WAF 已就绪：443 开着、证书对、源站对，此时才写 CNAME 切流量
+            write_waf_cname(cert, item, detail, accounts, cf, stats)
             log("")
             continue
+        waf_ready = False
         try:
             # 源站需要变更时必须走 ModifyDomain（带完整 Listen+Redirect），ModifyDomainCert 只换证书不碰源站
             if origin_changed:
@@ -1831,6 +1838,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                 log(f"[BIND] WAF {domain} 源站按配置覆盖 {cloud_backends} -> {backends}，绑定 {waf_label}")
                 if stats:
                     stats.add("WAF", "ok")
+                waf_ready = True
             elif has_443:
                 try:
                     # 只换证书引用，不碰端口/转发（ModifyDomainCert 无 HttpsPorts 参数）
@@ -1840,6 +1848,7 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                     log(f"[BIND] WAF {domain} 换证书 -> {waf_label}（原 CertId={cur_cert}）")
                     if stats:
                         stats.add("WAF", "ok")
+                    waf_ready = True
                 except Exception as e:
                     err = str(e)
                     # 该实例上 ModifyDomainCert 常因 WAF 侧 SSL/TLS 状态异常被拒（NeedSsl / InvalidTLS），
@@ -1852,16 +1861,21 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
                     log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
                     if stats:
                         stats.add("WAF", "ok")
+                    waf_ready = True
             else:
                 # 首次开 443：ModifyDomain 必须带完整 Listen + Redirect，否则会冲掉回源配置
                 backends = waf_open_443_and_bind(client, waf_region, iid, domain, detail, item, cert_identifier)
                 log(f"[BIND] WAF {domain} 开启 443 并绑定 {waf_label}（源站 {backends}）")
                 if stats:
                     stats.add("WAF", "ok")
+                waf_ready = True
         except Exception as e:
             log(f"[ERROR] WAF {domain} 绑定证书失败: {e}")
             if stats:
                 stats.add("WAF", "fail", names=domain)
+        # 只有在 WAF 就绪（SKIP 或绑定成功）后才写 CNAME 切流量；绑定失败时不切，避免流量打到未就绪的 WAF
+        if waf_ready:
+            write_waf_cname(cert, item, detail, accounts, cf, stats)
         log("")  # 每个域名处理完空一行
 
     # 3) 清理本脚本上传的 WAF 旧证书（仅 acme_waf_<cert_name>_ 前缀）
