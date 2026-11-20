@@ -503,6 +503,16 @@ def validate_config(cfg):
                 if kind == "WAF" and not dd.get("origin"):
                     warnings.append(f"{tag}: WAF 域名 {domain} 未配 origin 源站；"
                                     f"若该域名尚未接入 WAF 将无法自动接入，请先接入或补 origin/waf_origin")
+                # cname_domains 必须严格被本证书 SAN 覆盖：写错（如 11wuw.bet 少一位）
+                # 或不对应的域名直接报错，不靠运行时 DNS 模糊匹配掩盖配置错误。
+                if kind == "WAF":
+                    for ch in dd.get("cname_domains") or []:
+                        if not isinstance(ch, str) or not ch or any(x in ch for x in " /") \
+                                or ch.startswith(".") or "." not in ch or ch.startswith("*."):
+                            errors.append(f"{tag}: cname_domains 项 {ch!r} 非法（须为不含通配符的合法域名）")
+                        elif domains and not cert_covers(c, ch):
+                            errors.append(f"{tag}: cname 域名 {ch} 不被证书 SAN 覆盖"
+                                          f"（name={name}, domains={domains}），请核对是否写错")
         if c.get("_derived_domains") and len(domains) > 1:
             warnings.append(f"{tag}: domains 由 dcdn/waf 域名推导为 {domains}；"
                             f"如需泛域/裸域/额外 SAN，请显式写 domains")
@@ -1128,9 +1138,11 @@ def _cf_cname_upsert(name, value, cfg):
     if not token:
         log("[WARN] Cloudflare 写入 CNAME 缺少 api_token")
         return False
-    zone_name = name.split(".", 1)[1] if "." in name else name
+    # 与 TXT 不同：CNAME 的 name 可能就是主域本身（如 111wuw.bet），
+    # 必须从 name 开始逐级向上找 zone（111wuw.bet -> wuw.bet -> bet），
+    # 不能像 TXT 那样先去掉最左标签，否则会漏掉「zone 就是该主域」的情况。
     zone = None
-    candidate = zone_name
+    candidate = name
     while candidate:
         resp = _cf_api("GET", "/zones", token, params={"name": candidate, "per_page": 1})
         if resp.get("success") and resp.get("result"):
@@ -1158,6 +1170,14 @@ def _cf_cname_upsert(name, value, cfg):
         _cf_api("POST", f"/zones/{zid}/dns_records", token,
                 body={"type": "CNAME", "name": name, "content": value, "ttl": 1})
         log(f"[INFO] Cloudflare CNAME {name} 已添加 -> {value}")
+    # CNAME 不能与 A/AAAA 同名共存，删掉冲突记录才能生效（否则 Cloudflare 会拒绝或覆盖）
+    for rtype in ("A", "AAAA"):
+        resp = _cf_api("GET", f"/zones/{zid}/dns_records", token,
+                       params={"type": rtype, "name": name, "per_page": 100})
+        for r in resp.get("result") or []:
+            if (r.get("name") or "").rstrip(".") == name:
+                _cf_api("DELETE", f"/zones/{zid}/dns_records/{r['id']}", token)
+                log(f"[INFO] Cloudflare 删除与 CNAME 冲突的 {rtype} 记录 {name} -> {r.get('content')}")
     return True
 
 
@@ -1194,6 +1214,17 @@ def _ali_cname_upsert(host, target, cfg, acc_name, platform):
                 "DomainName": zone, "RR": rr, "Type": "CNAME", "Value": target,
             })
             log(f"[INFO] 阿里云 DNS CNAME {host} 已添加 -> {target}（{endpoint}）")
+        # CNAME 不能与 A/AAAA 同名共存，删掉冲突记录才能生效
+        for rtype in ("A", "AAAA"):
+            ar = _ali_dns_call(client, endpoint, "DescribeDomainRecords", {
+                "DomainName": zone, "RRKeyWord": rr, "Type": rtype, "PageSize": 100,
+            })
+            for rec in ((ar.get("DomainRecords") or {}).get("Record") or []):
+                if (rec.get("RR") or "") == rr:
+                    _ali_dns_call(client, endpoint, "DeleteDomainRecord", {
+                        "RecordId": rec["RecordId"],
+                    })
+                    log(f"[INFO] 阿里云 DNS 删除与 CNAME 冲突的 {rtype} 记录 {host} -> {rec.get('Value')}（{endpoint}）")
         return True
     except Exception as e:
         log(f"[WARN] 阿里云 DNS 写入 CNAME {host} 失败（{endpoint}）: {e}")
