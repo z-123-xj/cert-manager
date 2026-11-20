@@ -294,6 +294,18 @@ certificates:
           - "vjkdsoa.com"
           - "www.vjkdsoa.com"
 
+  - name: "supphchat.com"
+    dns: cloudflare
+    domains: ["supphchat.com", "*.supphchat.com"]
+    waf_domains:
+      - domain: "*.supphchat.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133"
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+        cname_domains:
+          - "supphchat.com"
+          - "www.supphchat.com"
+
   # ===== 源站 8.222.165.188（14 项）=====
 
   - name: "ywjhsxl.com"
@@ -585,3 +597,17 @@ certificates:
         cname_domains:
           - "wumslmv.com"
           - "www.wumslmv.com"
+
+
+  - name: "callreqsg.com"
+    dns: aliyun_intl
+    domains: ["callreqsg.com", "*.callreqsg.com"]
+    waf_domains:
+      - domain: "*.callreqsg.com"
+        deploy: aliyun_cn
+        waf_origin: "47.84.116.133" 
+        waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1)
+        cname_domains:
+          - "callreqsg.com"
+          - "www.callreqsg.com"
+          - "api.callreqsg.com"
