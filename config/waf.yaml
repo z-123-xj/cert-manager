@@ -101,6 +101,9 @@ certificates:
         deploy: aliyun_cn
         waf_origin: "47.84.116.133"
         waf_zone: intl               # cn=中国内地(cn-hangzhou) / intl=非中国内地(ap-southeast-1) 
+        cname_domains:
+          - "444wuw.bet"
+          - "www.444wuw.bet"
 
   - name: "555wuw.bet"
     dns: cloudflare
