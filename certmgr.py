@@ -99,9 +99,25 @@ def _pad(s, width):
     return s + " " * max(0, width - w)
 
 
+def _as_bool(v, default=False):
+    """把配置值解析成布尔：bool 直接用，字符串按 true/false/yes/no/1/0/on/off 解析，其余回退默认值。"""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in ("true", "yes", "1", "on"):
+        return True
+    if s in ("false", "no", "0", "off"):
+        return False
+    return default
+
+
 class RunStats:
-    """一次运行的成功/跳过/失败计数：签发按证书，DCDN/WAF 按域名。"""
-    PRODUCTS = ("证书签发", "DCDN", "WAF")
+    """一次运行的成功/跳过/失败计数：签发按证书，DCDN/WAF/CNAME 按域名。"""
+    PRODUCTS = ("证书签发", "DCDN", "WAF", "CNAME")
 
     def __init__(self):
         self.data = {p: {"ok": 0, "skip": 0, "fail": 0} for p in self.PRODUCTS}
@@ -123,7 +139,7 @@ class RunStats:
     def render(self):
         log("")
         log("=" * 42)
-        log("执行结果汇总（签发按证书，DCDN/WAF 按域名）")
+        log("执行结果汇总（签发按证书，DCDN/WAF/CNAME 按域名）")
         log("-" * 42)
         log(_pad("产品", 14) + _pad("成功", 8) + _pad("跳过", 8) + _pad("失败", 8))
         log("-" * 42)
@@ -138,7 +154,7 @@ class RunStats:
 
 # ----------------------------- node_exporter 告警指标 -----------------------------
 PROM_DIR = "/var/lib/node_exporter/textfile_collector"
-PROM_PRODUCT = {"证书签发": "cert", "DCDN": "dcdn", "WAF": "waf"}
+PROM_PRODUCT = {"证书签发": "cert", "DCDN": "dcdn", "WAF": "waf", "CNAME": "cname"}
 
 
 def _prom_escape(s):
@@ -172,7 +188,7 @@ def write_prom_metrics(stats, errors=None, config_name="default"):
         "# HELP cert_manager_last_run_timestamp 最近一次运行结束的 Unix 时间戳",
         "# TYPE cert_manager_last_run_timestamp gauge",
         f'cert_manager_last_run_timestamp{{config="{cfg_label}"}} {int(time.time())}',
-        "# HELP cert_manager_errors 最近一次各产品失败数（签发按证书，DCDN/WAF 按域名）",
+        "# HELP cert_manager_errors 最近一次各产品失败数（签发按证书，DCDN/WAF/CNAME 按域名）",
         "# TYPE cert_manager_errors gauge",
     ]
     for p, key in PROM_PRODUCT.items():
@@ -333,6 +349,8 @@ def deploy_items(items, default_account, with_origin=False, default_origin=None,
                                if str(d).strip()]
                 if cname_hosts:
                     row["cname_domains"] = cname_hosts
+                    # cname_proxied: 仅 Cloudflare 生效，是否开橙云代理，默认 true；显式 false 则灰云
+                    row["cname_proxied"] = _as_bool(item.get("cname_proxied"), True)
         out.append(row)
     return out
 
@@ -1107,47 +1125,51 @@ def _split_host_zone(host, zones):
     return best, host[:-(len(best) + 1)]
 
 
-def dns_cname_upsert(hosts, target, dns_cfg):
+def dns_cname_upsert(hosts, target, dns_cfg, proxied=True):
     """把一批域名写成 CNAME 指向 target（WAF 分配的 Cname）：存在则改，不存在则加。
     hosts: 完整域名列表（如 ['xxx.com', 'cdn.xxx.com']）；target: CNAME 目标地址。
-    dns_cfg: (kind, platform, acc_name, cfg)。返回 (成功数, 失败数)。"""
+    dns_cfg: (kind, platform, acc_name, cfg)；proxied: 仅 Cloudflare 生效，是否开橙云代理。
+    返回 (成功数, 失败数, 是否实际发生了变更)。"""
     kind, platform, acc_name, cfg = dns_cfg
     if not isinstance(cfg, dict):
         log(f"[WARN] 写入 CNAME 缺少 DNS 凭证（{acc_name}），跳过")
-        return 0, len(hosts or [])
+        return 0, len(hosts or []), False
     target = (target or "").strip().rstrip(".")
     if not target:
         log("[WARN] WAF 未返回 Cname，跳过 CNAME 解析写入")
-        return 0, len(hosts or [])
+        return 0, len(hosts or []), False
     ok = fail = 0
+    changed = False
     for host in hosts or []:
         host = (host or "").strip().rstrip(".")
         if not host:
             continue
         try:
             if kind == "cloudflare":
-                done = _cf_cname_upsert(host, target, cfg)
+                done, ch = _cf_cname_upsert(host, target, cfg, proxied=proxied)
             elif kind == "aliyun":
-                done = _ali_cname_upsert(host, target, cfg, acc_name, platform)
+                done, ch = _ali_cname_upsert(host, target, cfg, acc_name, platform)
             else:
                 log(f"[WARN] 写入 CNAME 不支持的 DNS 平台 {kind}")
-                done = False
+                done, ch = False, False
         except Exception as e:
             log(f"[WARN] 写入 CNAME {host} 异常: {e}")
-            done = False
+            done, ch = False, False
         if done:
             ok += 1
         else:
             fail += 1
-    return ok, fail
+        changed = changed or ch
+    return ok, fail, changed
 
 
-def _cf_cname_upsert(name, value, cfg):
-    """Cloudflare 写 CNAME：逐级找 zone，按 name+type 精确匹配后改/加。"""
+def _cf_cname_upsert(name, value, cfg, proxied=True):
+    """Cloudflare 写 CNAME：逐级找 zone，按 name+type 精确匹配后改/加。
+    返回 (是否成功, 是否发生变更)。proxied=True 开橙云代理，False 灰云仅 DNS。"""
     token = cfg.get("api_token")
     if not token:
         log("[WARN] Cloudflare 写入 CNAME 缺少 api_token")
-        return False
+        return False, False
     # 与 TXT 不同：CNAME 的 name 可能就是主域本身（如 111wuw.bet），
     # 必须从 name 开始逐级向上找 zone（111wuw.bet -> wuw.bet -> bet），
     # 不能像 TXT 那样先去掉最左标签，否则会漏掉「zone 就是该主域」的情况。
@@ -1161,16 +1183,17 @@ def _cf_cname_upsert(name, value, cfg):
         candidate = candidate.split(".", 1)[1] if "." in candidate else ""
     if not zone:
         log(f"[WARN] Cloudflare 找不到 {name} 对应的 zone，无法自动加 CNAME")
-        return False
+        return False, False
     zid = zone["id"]
     resp = _cf_api("GET", f"/zones/{zid}/dns_records", token,
                    params={"type": "CNAME", "name": name, "per_page": 100})
     records = resp.get("result") or []
     records = [r for r in records if (r.get("name") or "").rstrip(".") == name]
     hit = next((r for r in records if (r.get("content") or "").rstrip(".") == value), None)
-    if hit:
-        log(f"[INFO] Cloudflare CNAME {name} 已存在且值一致，跳过")
-        return True
+    # 值一致且代理状态一致才算完全匹配，否则要更新 proxied
+    if hit and bool(hit.get("proxied")) == bool(proxied):
+        log(f"[INFO] Cloudflare CNAME {name} 已存在且值/代理一致，跳过")
+        return True, False
     # CNAME 不能与 A/AAAA 同名共存：必须先删掉冲突记录，再写 CNAME，
     # 否则 Cloudflare 直接返回 400（CNAME 与 A 记录冲突），CNAME 写不进去。
     for rtype in ("A", "AAAA"):
@@ -1180,24 +1203,30 @@ def _cf_cname_upsert(name, value, cfg):
             if (r.get("name") or "").rstrip(".") == name:
                 _cf_api("DELETE", f"/zones/{zid}/dns_records/{r['id']}", token)
                 log(f"[INFO] Cloudflare 删除与 CNAME 冲突的 {rtype} 记录 {name} -> {r.get('content')}")
-    if records:
+    if hit:
+        # 值一致但代理状态不同：PATCH 只改 proxied
+        rid = hit["id"]
+        _cf_api("PATCH", f"/zones/{zid}/dns_records/{rid}", token,
+                body={"type": "CNAME", "name": name, "content": value, "proxied": proxied, "ttl": 1})
+        log(f"[INFO] Cloudflare CNAME {name} 代理状态更新为 {'橙云' if proxied else '灰云'}")
+    elif records:
         rid = records[0]["id"]
         _cf_api("PATCH", f"/zones/{zid}/dns_records/{rid}", token,
-                body={"type": "CNAME", "name": name, "content": value, "ttl": 1})
-        log(f"[INFO] Cloudflare CNAME {name} 已存在，更新为 {value}")
+                body={"type": "CNAME", "name": name, "content": value, "proxied": proxied, "ttl": 1})
+        log(f"[INFO] Cloudflare CNAME {name} 已存在，更新为 {value}（{'橙云' if proxied else '灰云'}）")
     else:
         _cf_api("POST", f"/zones/{zid}/dns_records", token,
-                body={"type": "CNAME", "name": name, "content": value, "ttl": 1})
-        log(f"[INFO] Cloudflare CNAME {name} 已添加 -> {value}")
-    return True
+                body={"type": "CNAME", "name": name, "content": value, "proxied": proxied, "ttl": 1})
+        log(f"[INFO] Cloudflare CNAME {name} 已添加 -> {value}（{'橙云' if proxied else '灰云'}）")
+    return True, True
 
 
 def _ali_cname_upsert(host, target, cfg, acc_name, platform):
-    """阿里云 DNS 写 CNAME：先列托管域拆 zone/RR，再精确匹配后改/加。"""
+    """阿里云 DNS 写 CNAME：先列托管域拆 zone/RR，再精确匹配后改/加。返回 (是否成功, 是否变更)。"""
     k, s = cfg.get("access_key"), cfg.get("access_secret")
     if not (k and s):
         log(f"[WARN] DNS 账号 {acc_name} 缺 access_key/access_secret，无法自动加 CNAME")
-        return False
+        return False, False
     endpoint, region = _ali_dns_endpoint(platform, cfg)
     try:
         client = AcsClient(k, s, region)
@@ -1205,7 +1234,7 @@ def _ali_cname_upsert(host, target, cfg, acc_name, platform):
         zone, rr = _split_host_zone(host, zones)
         if not zone:
             log(f"[WARN] 阿里云 DNS 账号 {acc_name} 下找不到 {host} 的托管主域，无法加 CNAME")
-            return False
+            return False, False
         recs_resp = _ali_dns_call(client, endpoint, "DescribeDomainRecords", {
             "DomainName": zone, "RRKeyWord": rr, "Type": "CNAME", "PageSize": 100,
         })
@@ -1214,7 +1243,7 @@ def _ali_cname_upsert(host, target, cfg, acc_name, platform):
         hit = next((r for r in records if (r.get("Value") or "").rstrip(".") == target), None)
         if hit:
             log(f"[INFO] 阿里云 DNS CNAME {host} 已存在且值一致，跳过（{endpoint}）")
-            return True
+            return True, False
         # CNAME 不能与 A/AAAA 同名共存：必须先删冲突记录再写 CNAME，否则 AddDomainRecord 会报冲突
         for rtype in ("A", "AAAA"):
             ar = _ali_dns_call(client, endpoint, "DescribeDomainRecords", {
@@ -1236,10 +1265,10 @@ def _ali_cname_upsert(host, target, cfg, acc_name, platform):
                 "DomainName": zone, "RR": rr, "Type": "CNAME", "Value": target,
             })
             log(f"[INFO] 阿里云 DNS CNAME {host} 已添加 -> {target}（{endpoint}）")
-        return True
+        return True, True
     except Exception as e:
         log(f"[WARN] 阿里云 DNS 写入 CNAME {host} 失败（{endpoint}）: {e}")
-        return False
+        return False, False
 
 
 # ----------------------------- WAF 3.0 部署 -----------------------------
@@ -1759,10 +1788,20 @@ def deploy_waf_group(cert, account, acc_name, items, force, platform=None, waf_i
             waf_cname = (detail.get("Cname") or "").strip()
             if waf_cname:
                 dns_cfg = cert_dns_cfg(cert, accounts or {}, cf or {})
-                ok_n, fail_n = dns_cname_upsert(cname_hosts, waf_cname, dns_cfg)
-                log(f"[INFO] WAF {domain} CNAME 解析写入完成：成功 {ok_n} / 失败 {fail_n}（目标 {waf_cname}）")
+                proxied = item.get("cname_proxied", True)
+                ok_n, fail_n, cname_changed = dns_cname_upsert(cname_hosts, waf_cname, dns_cfg, proxied=proxied)
+                log(f"[INFO] WAF {domain} CNAME 解析写入完成：成功 {ok_n} / 失败 {fail_n}"
+                    f"（目标 {waf_cname}，{'橙云' if proxied else '灰云'}）")
+                if stats:
+                    for ch in cname_hosts[:ok_n]:
+                        stats.add("CNAME", "ok", names=ch)
+                    # 失败域名用真实失败的 host：这里按 ok_n 顺序取前 ok_n 个为成功，其余为失败
+                    for ch in cname_hosts[ok_n:]:
+                        stats.add("CNAME", "fail", names=ch)
             else:
                 log(f"[WARN] WAF {domain} 详情未返回 Cname，跳过 {len(cname_hosts)} 条 CNAME 解析写入")
+                if stats:
+                    stats.add("CNAME", "fail", len(cname_hosts), names=cname_hosts)
         listen = detail["Listen"] or {}
         https_ports = listen.get("HttpsPorts") or []
         cur_cert = listen.get("CertId") or (detail.get("CertDetail") or {}).get("Id")

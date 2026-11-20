@@ -20,10 +20,12 @@ cloudflare:
 # WAF：waf_id 留空则按该域名 deploy 平台/账号自动发现实例；.env 的 *_WAF_INSTANCE_ID 仅兜底。
 # WAF CNAME 自动解析：在需要切流量到 WAF 的域名项下加 cname_domains，列出要解析的域名，
 # 程序接入成功后取 WAF 分配的 Cname 自动写 CNAME（存在则改、不存在则加），用证书的 dns_account 写入。
+# cname_proxied 仅 Cloudflare 生效：是否开橙云代理，默认 true；写 false 则灰云仅 DNS。
 # 例如接入 *.xxx.com 时希望 xxx.com(主域@) 和 cdn.xxx.com 都走 WAF：
 #     cname_domains:
 #       - "xxx.com"
 #       - "cdn.xxx.com"
+#     cname_proxied: true
 
 certificates:
   # ===== 源站 47.84.116.133（22 项）=====
